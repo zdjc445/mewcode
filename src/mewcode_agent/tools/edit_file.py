@@ -12,6 +12,7 @@ from mewcode_agent.tools.file_state_cache import FileStateCache
 
 
 class EditFileTool(Tool):
+    category = "write"
     name = "edit_file"
     description = (
         "在 UTF-8 文本文件中按顺序进行多段原文替换。每项 old_text 必须在处理到该项时"

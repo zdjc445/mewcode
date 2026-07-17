@@ -12,6 +12,7 @@ from mewcode_agent.tools.base import Tool, ToolExecutionError, validate_argument
 
 
 class RunCommandTool(Tool):
+    category = "command"
     name = "run_command"
     description = (
         "在系统命令解释器中执行命令并返回退出码、标准输出和标准错误。"
@@ -85,4 +86,3 @@ class RunCommandTool(Tool):
                 details=result,
             )
         return result
-

@@ -14,6 +14,7 @@ MAX_READ_LINES = 2000
 
 
 class ReadFileTool(Tool):
+    category = "read"
     name = "read_file"
     description = (
         "按行读取 UTF-8 文本文件，支持使用 offset 和 limit 分页。"

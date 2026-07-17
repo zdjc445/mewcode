@@ -635,3 +635,24 @@ def test_registry_exposes_six_tools_in_both_protocol_formats() -> None:
     assert [tool["name"] for tool in anthropic_tools] == expected_names
     assert openai_tools[0]["function"]["parameters"] == ReadFileTool.parameters
     assert anthropic_tools[0]["input_schema"] == ReadFileTool.parameters
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected_category"),
+    [
+        ("read_file", "read"),
+        ("find_files", "read"),
+        ("search_code", "read"),
+        ("write_file", "write"),
+        ("edit_file", "write"),
+        ("run_command", "command"),
+    ],
+)
+def test_core_tools_have_exact_categories(
+    tool_name: str,
+    expected_category: str,
+) -> None:
+    tool = create_core_registry().get(tool_name)
+
+    assert tool is not None
+    assert tool.category == expected_category

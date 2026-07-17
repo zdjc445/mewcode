@@ -11,6 +11,7 @@ from mewcode_agent.tools.file_state_cache import FileStateCache
 
 
 class WriteFileTool(Tool):
+    category = "write"
     name = "write_file"
     description = (
         "以 UTF-8 写入完整文件内容，覆盖已有文件；父目录不存在时自动创建。"

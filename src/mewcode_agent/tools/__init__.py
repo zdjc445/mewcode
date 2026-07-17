@@ -1,6 +1,11 @@
 """Public tool-system API."""
 
-from mewcode_agent.tools.base import Tool, ToolExecutionError, ToolResult
+from mewcode_agent.tools.base import (
+    Tool,
+    ToolCategory,
+    ToolExecutionError,
+    ToolResult,
+)
 from mewcode_agent.tools.edit_file import EditFileTool
 from mewcode_agent.tools.file_state_cache import FileStateCache
 from mewcode_agent.tools.find_files import FindFilesTool
@@ -18,6 +23,7 @@ __all__ = [
     "RunCommandTool",
     "SearchCodeTool",
     "Tool",
+    "ToolCategory",
     "ToolExecutionError",
     "ToolRegistry",
     "ToolResult",

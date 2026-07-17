@@ -12,6 +12,7 @@ from mewcode_agent.tools.base import Tool, ToolExecutionError, validate_argument
 
 
 class SearchCodeTool(Tool):
+    category = "read"
     name = "search_code"
     description = (
         "使用 Python 正则表达式搜索 UTF-8 文本文件内容，返回文件、行号和匹配行。"
@@ -79,4 +80,3 @@ class SearchCodeTool(Tool):
             "file_pattern": file_pattern,
             "matches": matches,
         }
-

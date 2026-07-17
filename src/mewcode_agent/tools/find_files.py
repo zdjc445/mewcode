@@ -12,6 +12,7 @@ from mewcode_agent.tools.base import Tool, ToolExecutionError, validate_argument
 
 
 class FindFilesTool(Tool):
+    category = "read"
     name = "find_files"
     description = (
         "按 glob 模式查找文件并返回绝对路径列表。支持 ** 递归模式，并包含隐藏文件。"
@@ -64,4 +65,3 @@ class FindFilesTool(Tool):
             "pattern": pattern,
             "matches": matches,
         }
-

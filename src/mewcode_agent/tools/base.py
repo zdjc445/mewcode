@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, TypeAlias
+
+ToolCategory: TypeAlias = Literal["read", "write", "command"]
 
 
 class ToolExecutionError(RuntimeError):
@@ -57,6 +59,7 @@ class Tool(ABC):
     name: str
     description: str
     parameters: dict[str, Any]
+    category: ToolCategory
     timeout_seconds: float = 30.0
 
     @abstractmethod
@@ -97,4 +100,3 @@ def validate_arguments(
                 "invalid_arguments",
                 f"参数 {name} 必须为 {expected_type.__name__}",
             )
-
