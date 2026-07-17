@@ -22,6 +22,12 @@ from mewcode_agent.agent.events import (
     ToolResultEvent,
     UserMessageEvent,
 )
+from mewcode_agent.agent.tool_scheduler import (
+    NoOpToolExecutionInterceptor,
+    ToolExecutionInterceptor,
+    ToolScheduler,
+    ToolSchedulerEvent,
+)
 
 __all__ = [
     "AgentEvent",
@@ -31,6 +37,7 @@ __all__ = [
     "FinalResponseEvent",
     "ModelTextEvent",
     "ModelThinkingEvent",
+    "NoOpToolExecutionInterceptor",
     "PlanApprovalDecision",
     "PlanApprovalRequestedEvent",
     "PlanApprovalResolution",
@@ -40,6 +47,9 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalRequestedEvent",
     "ToolCallStartedEvent",
+    "ToolExecutionInterceptor",
     "ToolResultEvent",
+    "ToolScheduler",
+    "ToolSchedulerEvent",
     "UserMessageEvent",
 ]
