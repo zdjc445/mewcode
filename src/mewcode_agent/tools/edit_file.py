@@ -7,6 +7,7 @@ from typing import Any
 
 from mewcode_agent.tools._paths import expand_path
 from mewcode_agent.tools.base import Tool, ToolExecutionError, validate_arguments
+from mewcode_agent.tools.diff import DiffResult, build_diff
 
 
 class EditFileTool(Tool):
@@ -14,6 +15,7 @@ class EditFileTool(Tool):
     description = (
         "在 UTF-8 文本文件中按顺序进行多段原文替换。每项 old_text 必须在处理到该项时"
         "恰好出现一次；任意一项未匹配或多次匹配时，整个文件保持不变。"
+        "成功时返回统一 diff 和增删行数。"
     )
     parameters = {
         "type": "object",
@@ -87,10 +89,11 @@ class EditFileTool(Tool):
                 )
             validated_edits.append((old_text, edit_arguments["new_text"]))
 
-        def edit() -> None:
-            content = path.read_text(encoding="utf-8")
+        def edit() -> DiffResult:
+            old_content = path.read_text(encoding="utf-8")
+            new_content = old_content
             for index, (old_text, new_text) in enumerate(validated_edits):
-                match_count = content.count(old_text)
+                match_count = new_content.count(old_text)
                 if match_count == 0:
                     raise ToolExecutionError(
                         "text_not_found",
@@ -104,11 +107,17 @@ class EditFileTool(Tool):
                             f"{match_count} 处，必须唯一匹配"
                         ),
                     )
-                content = content.replace(old_text, new_text, 1)
-            path.write_text(content, encoding="utf-8")
+                new_content = new_content.replace(old_text, new_text, 1)
+            diff = build_diff(old_content, new_content)
+            path.write_text(new_content, encoding="utf-8")
+            return diff
 
-        await asyncio.to_thread(edit)
+        diff = await asyncio.to_thread(edit)
         return {
             "path": str(path.resolve()),
             "replacements": len(validated_edits),
+            "additions": diff.additions,
+            "removals": diff.removals,
+            "diff": diff.text,
+            "diff_truncated": diff.truncated,
         }

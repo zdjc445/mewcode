@@ -141,6 +141,13 @@ async def test_edit_file_applies_multiple_exact_matches_in_order(
 
     assert result.success is True
     assert result.data["replacements"] == 2
+    assert result.data["additions"] == 2
+    assert result.data["removals"] == 2
+    assert result.data["diff_truncated"] is False
+    assert "-first" in result.data["diff"]
+    assert "+new first" in result.data["diff"]
+    assert "-last" in result.data["diff"]
+    assert "+new last" in result.data["diff"]
     assert path.read_text(encoding="utf-8") == "new first\nmiddle\nnew last\n"
 
 
@@ -164,7 +171,66 @@ async def test_edit_file_each_edit_sees_previous_edit_output(tmp_path: Path) -> 
 
     assert result.success is True
     assert result.data["replacements"] == 2
+    assert result.data["additions"] == 1
+    assert result.data["removals"] == 1
+    assert "-old" in result.data["diff"]
+    assert "+final" in result.data["diff"]
     assert path.read_text(encoding="utf-8") == "final"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_returns_empty_diff_for_unchanged_content(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("unchanged\n", encoding="utf-8")
+
+    result = await create_core_registry().execute(
+        "edit_file",
+        json.dumps(
+            {
+                "path": str(path),
+                "edits": [
+                    {"old_text": "unchanged", "new_text": "unchanged"},
+                ],
+            }
+        ),
+    )
+
+    assert result.success is True
+    assert result.data["additions"] == 0
+    assert result.data["removals"] == 0
+    assert result.data["diff"] == ""
+    assert result.data["diff_truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_edit_file_truncates_large_diff(tmp_path: Path) -> None:
+    path = tmp_path / "example.txt"
+    old_content = "\n".join(f"old {index}" for index in range(250)) + "\n"
+    new_content = "\n".join(f"new {index}" for index in range(250)) + "\n"
+    path.write_text(old_content, encoding="utf-8")
+
+    result = await create_core_registry().execute(
+        "edit_file",
+        json.dumps(
+            {
+                "path": str(path),
+                "edits": [
+                    {"old_text": old_content, "new_text": new_content},
+                ],
+            }
+        ),
+    )
+
+    assert result.success is True
+    assert result.data["additions"] == 250
+    assert result.data["removals"] == 250
+    assert result.data["diff_truncated"] is True
+    assert result.data["diff"].endswith(
+        "... diff 已截断，只显示前 200 行"
+    )
+    assert path.read_text(encoding="utf-8") == new_content
 
 
 @pytest.mark.asyncio
