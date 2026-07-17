@@ -4,168 +4,172 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Button, Input, RichLog, Static, Switch
 
-from mewcode_agent.app import ChatApp, MAX_TOOL_CALLS_PER_TURN
+from mewcode_agent.agent import (
+    AgentEvent,
+    AgentRunContext,
+    FinalResponseEvent,
+    ModelTextEvent,
+    ModelThinkingEvent,
+    PlanApprovalRequestedEvent,
+    PlanApprovalResolution,
+    RoundStartedEvent,
+    RunCancelledEvent,
+    RunErrorEvent,
+    ToolApprovalRequestedEvent,
+    UserMessageEvent,
+)
+from mewcode_agent.agent.context import AgentRunCancelled
+from mewcode_agent.app import ChatApp
 from mewcode_agent.history import ConversationHistory
-from mewcode_agent.models import ChatMessage, ToolCall
-from mewcode_agent.providers.base import ProviderError
-from mewcode_agent.tools import Tool, ToolRegistry
+from mewcode_agent.models import ChatMessage
 
 
-class GatedProvider:
+class GatedAgentLoop:
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
-        self.received_messages: list[ChatMessage] = []
+        self.plan_only_values: list[bool] = []
 
-    async def stream_chat(
+    async def run(
         self,
-        messages: list[ChatMessage],
-    ) -> AsyncIterator[str]:
-        self.received_messages = messages
-        yield "分片"
-        self.started.set()
-        await self.release.wait()
-        yield "完成"
-
-
-class ErrorProvider:
-    async def stream_chat(
-        self,
-        messages: list[ChatMessage],
-    ) -> AsyncIterator[str]:
-        if False:
-            yield ""
-        raise ProviderError("模拟失败")
-
-
-class RecordingProvider:
-    def __init__(self) -> None:
-        self.requests: list[list[ChatMessage]] = []
-
-    async def stream_chat(
-        self,
-        messages: list[ChatMessage],
-    ) -> AsyncIterator[str]:
-        self.requests.append(messages)
-        yield f"回答{len(self.requests)}"
-
-
-class CountingTool(Tool):
-    name = "count"
-    description = "测试工具"
-    parameters = {
-        "type": "object",
-        "properties": {"value": {"type": "integer"}},
-        "required": ["value"],
-    }
-
-    def __init__(self) -> None:
-        self.values: list[int] = []
-
-    async def execute(self, arguments: dict[str, object]) -> dict[str, object]:
-        value = arguments["value"]
-        assert isinstance(value, int)
-        self.values.append(value)
-        return {"value": value}
-
-
-class ToolCallingProvider:
-    protocol = "openai"
-
-    def __init__(self) -> None:
-        self.requests: list[list[ChatMessage]] = []
-        self.tools: list[list[dict[str, object]]] = []
-
-    async def stream_chat(
-        self,
-        messages: list[ChatMessage],
+        user_message: str,
+        history: ConversationHistory,
         *,
-        tools: list[dict[str, object]] | None = None,
-    ) -> AsyncIterator[str | ToolCall]:
-        self.requests.append(messages)
-        self.tools.append(tools or [])
-        turn_number = sum(message.role == "user" for message in messages)
-        if messages[-1].role == "user":
-            yield ToolCall(
-                f"call_{turn_number}",
-                "count",
-                f'{{"value":{turn_number}}}',
+        plan_only: bool,
+        context: AgentRunContext,
+    ) -> AsyncIterator[AgentEvent]:
+        context.begin_run()
+        self.plan_only_values.append(plan_only)
+        history.add_user(user_message)
+        try:
+            yield UserMessageEvent(user_message)
+            yield RoundStartedEvent(
+                1,
+                15,
+                "planning" if plan_only else "executing",
             )
-        else:
-            yield f"完成{turn_number}"
+            yield ModelThinkingEvent("分析")
+            yield ModelTextEvent("分片")
+            self.started.set()
+            await self.release.wait()
+            history.add_assistant("分片完成")
+            yield ModelTextEvent("完成")
+            yield FinalResponseEvent("分片完成", 1)
+        finally:
+            context.finish_run()
 
 
-class MultiToolProvider:
-    protocol = "openai"
-
-    def __init__(self) -> None:
-        self.requests: list[list[ChatMessage]] = []
-
-    async def stream_chat(
+class ErrorAgentLoop:
+    async def run(
         self,
-        messages: list[ChatMessage],
+        user_message: str,
+        history: ConversationHistory,
         *,
-        tools: list[dict[str, object]] | None = None,
-    ) -> AsyncIterator[str | ToolCall]:
-        self.requests.append(messages)
-        round_number = len(self.requests)
-        if round_number == 1:
-            yield ToolCall("call_1", "count", '{"value":1}')
-            yield ToolCall("call_2", "count", '{"value":2}')
-        elif round_number == 2:
-            yield ToolCall("call_3", "count", '{"value":3}')
-        else:
-            yield "全部完成"
+        plan_only: bool,
+        context: AgentRunContext,
+    ) -> AsyncIterator[AgentEvent]:
+        context.begin_run()
+        history.add_user(user_message)
+        try:
+            yield UserMessageEvent(user_message)
+            yield RunErrorEvent("provider_error", "模拟失败")
+        finally:
+            context.finish_run()
 
 
-class EndlessToolProvider:
-    protocol = "openai"
-
+class ToolApprovalAgentLoop:
     def __init__(self) -> None:
-        self.received_tools: list[list[dict[str, object]] | None] = []
+        self.decision: str | None = None
+        self.cancelled = False
 
-    async def stream_chat(
+    async def run(
         self,
-        messages: list[ChatMessage],
+        user_message: str,
+        history: ConversationHistory,
         *,
-        tools: list[dict[str, object]] | None = None,
-    ) -> AsyncIterator[str | ToolCall]:
-        self.received_tools.append(tools)
-        if tools is None:
-            yield "已根据现有结果总结"
-        else:
-            number = len(self.received_tools)
-            yield ToolCall(
-                f"call_{number}",
-                "count",
-                f'{{"value":{number}}}',
+        plan_only: bool,
+        context: AgentRunContext,
+    ) -> AsyncIterator[AgentEvent]:
+        context.begin_run()
+        history.add_user(user_message)
+        try:
+            yield UserMessageEvent(user_message)
+            request_id = context.open_tool_approval()
+            yield ToolApprovalRequestedEvent(
+                request_id,
+                "call-1",
+                "write_file",
+                '{"path":"README.md"}',
+                "write",
             )
+            try:
+                self.decision = await context.wait_for_tool_approval(
+                    request_id
+                )
+                yield RunCancelledEvent("test_complete")
+            except AgentRunCancelled:
+                self.cancelled = True
+                yield RunCancelledEvent("user_cancelled")
+        finally:
+            context.finish_run()
 
 
-class OversizedBatchProvider:
-    protocol = "openai"
-
-    def __init__(self) -> None:
-        self.request_count = 0
-
-    async def stream_chat(
+class PlanApprovalAgentLoop:
+    def __init__(
         self,
-        messages: list[ChatMessage],
         *,
-        tools: list[dict[str, object]] | None = None,
-    ) -> AsyncIterator[str | ToolCall]:
-        self.request_count += 1
-        if tools is None:
-            yield "批量调用处理完成"
-            return
-        for number in range(1, MAX_TOOL_CALLS_PER_TURN + 2):
-            yield ToolCall(
-                f"batch_{number}",
-                "count",
-                f'{{"value":{number}}}',
+        can_execute: bool = True,
+        can_request_changes: bool = True,
+    ) -> None:
+        self.can_execute = can_execute
+        self.can_request_changes = can_request_changes
+        self.resolution: PlanApprovalResolution | None = None
+        self.cancelled = False
+
+    async def run(
+        self,
+        user_message: str,
+        history: ConversationHistory,
+        *,
+        plan_only: bool,
+        context: AgentRunContext,
+    ) -> AsyncIterator[AgentEvent]:
+        context.begin_run()
+        history.add_user(user_message)
+        history.add_assistant("实施计划")
+        try:
+            yield UserMessageEvent(user_message)
+            request_id = context.open_plan_approval()
+            yield PlanApprovalRequestedEvent(
+                request_id,
+                "实施计划",
+                self.can_execute,
+                self.can_request_changes,
             )
+            try:
+                self.resolution = await context.wait_for_plan_approval(
+                    request_id
+                )
+                yield RunCancelledEvent("test_complete")
+            except AgentRunCancelled:
+                self.cancelled = True
+                yield RunCancelledEvent("user_cancelled")
+        finally:
+            context.finish_run()
+
+
+def make_app(
+    loop: object,
+    history: ConversationHistory | None = None,
+) -> ChatApp:
+    return ChatApp(
+        loop,  # type: ignore[arg-type]
+        history if history is not None else ConversationHistory(),
+        provider_id="deepseek_openai",
+        model="deepseek-v4-pro",
+    )
 
 
 def render_log_text(log: RichLog) -> str:
@@ -173,54 +177,48 @@ def render_log_text(log: RichLog) -> str:
 
 
 @pytest.mark.asyncio
-async def test_app_streams_and_restores_input() -> None:
-    provider = GatedProvider()
+async def test_app_consumes_agent_events_and_restores_input() -> None:
+    loop = GatedAgentLoop()
     history = ConversationHistory()
-    app = ChatApp(
-        provider,
-        history,
-        provider_id="deepseek_openai",
-        model="deepseek-v4-pro",
-    )
+    app = make_app(loop, history)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
+        plan_switch = app.query_one("#plan-only-switch", Switch)
+        plan_switch.value = True
         prompt_input.value = "记住 42"
         await pilot.press("enter")
-        await provider.started.wait()
+        await loop.started.wait()
         await pilot.pause()
 
         assert prompt_input.disabled is True
+        assert plan_switch.disabled is True
+        assert app.active_thinking == "分析"
         assert app.active_response == "分片"
-        assert "Assistant: 分片" in render_log_text(
-            app.query_one("#chat-log", RichLog)
-        )
+        log_text = render_log_text(app.query_one("#chat-log", RichLog))
+        assert "Thinking: 分析" in log_text
+        assert "Assistant: 分片" in log_text
 
-        provider.release.set()
+        loop.release.set()
         await app.workers.wait_for_complete()
         await pilot.pause()
 
         assert prompt_input.disabled is False
         assert prompt_input.has_focus is True
+        assert plan_switch.disabled is False
+        assert plan_switch.value is True
+        assert loop.plan_only_values == [True]
         assert history.snapshot() == [
             ChatMessage(role="user", content="记住 42"),
             ChatMessage(role="assistant", content="分片完成"),
-        ]
-        assert provider.received_messages == [
-            ChatMessage(role="user", content="记住 42")
         ]
 
 
 @pytest.mark.asyncio
 async def test_app_ignores_blank_input() -> None:
-    provider = GatedProvider()
+    loop = GatedAgentLoop()
     history = ConversationHistory()
-    app = ChatApp(
-        provider,
-        history,
-        provider_id="deepseek_openai",
-        model="deepseek-v4-pro",
-    )
+    app = make_app(loop, history)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
@@ -230,18 +228,13 @@ async def test_app_ignores_blank_input() -> None:
 
         assert len(history) == 0
         assert prompt_input.disabled is False
-        assert not provider.started.is_set()
+        assert not loop.started.is_set()
 
 
 @pytest.mark.asyncio
-async def test_app_recovers_from_provider_error_without_adding_error_to_history() -> None:
+async def test_app_renders_agent_error_without_adding_error_to_history() -> None:
     history = ConversationHistory()
-    app = ChatApp(
-        ErrorProvider(),
-        history,
-        provider_id="deepseek_openai",
-        model="deepseek-v4-pro",
-    )
+    app = make_app(ErrorAgentLoop(), history)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
@@ -252,185 +245,135 @@ async def test_app_recovers_from_provider_error_without_adding_error_to_history(
 
         status = app.query_one("#status", Static)
         assert "错误：模拟失败" in str(status.render())
-        assert prompt_input.disabled is False
-        assert prompt_input.has_focus is True
         assert history.snapshot() == [
             ChatMessage(role="user", content="触发错误")
         ]
 
 
 @pytest.mark.asyncio
-async def test_second_turn_sends_complete_first_turn_history() -> None:
-    provider = RecordingProvider()
-    history = ConversationHistory()
-    app = ChatApp(
-        provider,
-        history,
-        provider_id="deepseek_openai",
-        model="deepseek-v4-pro",
-    )
+@pytest.mark.parametrize(
+    ("button_id", "expected"),
+    [("#allow-once", "allow_once"), ("#reject-tool", "reject")],
+)
+async def test_tool_approval_card_resolves_context(
+    button_id: str,
+    expected: str,
+) -> None:
+    loop = ToolApprovalAgentLoop()
+    app = make_app(loop)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
-        prompt_input.value = "第一问"
+        prompt_input.value = "执行写工具"
         await pilot.press("enter")
+        await pilot.pause()
+        await pilot.click(button_id)
         await app.workers.wait_for_complete()
 
-        prompt_input.value = "第二问"
-        await pilot.press("enter")
-        await app.workers.wait_for_complete()
-
-        assert provider.requests[1] == [
-            ChatMessage(role="user", content="第一问"),
-            ChatMessage(role="assistant", content="回答1"),
-            ChatMessage(role="user", content="第二问"),
-        ]
+    assert loop.decision == expected
 
 
 @pytest.mark.asyncio
-async def test_each_user_request_can_execute_one_tool() -> None:
-    provider = ToolCallingProvider()
-    tool = CountingTool()
-    registry = ToolRegistry()
-    registry.register(tool)
-    history = ConversationHistory()
-    app = ChatApp(
-        provider,
-        history,
-        provider_id="deepseek_openai",
-        model="deepseek-v4-pro",
-        tool_registry=registry,
-    )
+@pytest.mark.parametrize(
+    ("button_id", "expected"),
+    [
+        ("#execute-current", "execute_current"),
+        ("#reject-plan", "reject"),
+    ],
+)
+async def test_plan_approval_card_resolves_simple_decisions(
+    button_id: str,
+    expected: str,
+) -> None:
+    loop = PlanApprovalAgentLoop()
+    app = make_app(loop)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
-        prompt_input.value = "第一次"
+        prompt_input.value = "规划任务"
         await pilot.press("enter")
-        await app.workers.wait_for_complete()
-
-        prompt_input.value = "第二次"
-        await pilot.press("enter")
-        await app.workers.wait_for_complete()
         await pilot.pause()
+        await pilot.click(button_id)
+        await app.workers.wait_for_complete()
 
-    assert tool.values == [1, 2]
-    assert len(provider.requests) == 4
-    assert len(provider.tools[0]) == 1
-    assert provider.requests[1] == history.snapshot()[:3]
-    assert provider.requests[2] == history.snapshot()[:5]
-    assert history.snapshot()[1].tool_calls == (
-        ToolCall("call_1", "count", '{"value":1}'),
-    )
-    first_result = history.snapshot()[2]
-    assert first_result.role == "tool"
-    assert first_result.tool_call_id == "call_1"
-    assert '"success":true' in first_result.content
-    assert history.snapshot()[-1] == ChatMessage(
-        role="assistant",
-        content="完成2",
-    )
-    assert prompt_input.disabled is False
+    assert loop.resolution == PlanApprovalResolution(expected)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_executes_parallel_calls_in_order_and_continues() -> None:
-    provider = MultiToolProvider()
-    tool = CountingTool()
-    registry = ToolRegistry()
-    registry.register(tool)
-    history = ConversationHistory()
-    app = ChatApp(
-        provider,
-        history,
-        provider_id="deepseek_openai",
-        model="deepseek-v4-pro",
-        tool_registry=registry,
-    )
+async def test_plan_change_card_requires_and_returns_feedback() -> None:
+    loop = PlanApprovalAgentLoop()
+    app = make_app(loop)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
-        prompt_input.value = "执行多个工具"
+        prompt_input.value = "规划任务"
         await pilot.press("enter")
-        await app.workers.wait_for_complete()
         await pilot.pause()
 
-    assert tool.values == [1, 2, 3]
-    assert len(provider.requests) == 3
-    assert history.snapshot()[1].tool_calls == (
-        ToolCall("call_1", "count", '{"value":1}'),
-        ToolCall("call_2", "count", '{"value":2}'),
+        clicked = await pilot.click("#request-changes")
+        assert clicked is True
+        feedback = app.screen.query_one("#plan-feedback", Input)
+        assert feedback.placeholder == "必须填写修改意见"
+
+        feedback.value = "补充测试步骤"
+        await pilot.pause(0.21)
+        assert feedback.value == "补充测试步骤"
+        clicked = await pilot.click("#request-changes")
+        assert clicked is True
+        assert feedback.value == "补充测试步骤"
+        await pilot.pause()
+        assert loop.resolution == PlanApprovalResolution(
+            "request_changes",
+            "补充测试步骤",
+        )
+        await app.workers.wait_for_complete()
+
+    assert loop.resolution == PlanApprovalResolution(
+        "request_changes",
+        "补充测试步骤",
     )
-    assert history.snapshot()[-1] == ChatMessage(
-        role="assistant",
-        content="全部完成",
-    )
-    assert prompt_input.disabled is False
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_disables_tools_for_summary_after_limit() -> None:
-    provider = EndlessToolProvider()
-    tool = CountingTool()
-    registry = ToolRegistry()
-    registry.register(tool)
-    history = ConversationHistory()
-    app = ChatApp(
-        provider,
-        history,
-        provider_id="deepseek_openai",
-        model="deepseek-v4-pro",
-        tool_registry=registry,
+async def test_final_round_plan_card_disables_execute_and_changes() -> None:
+    loop = PlanApprovalAgentLoop(
+        can_execute=False,
+        can_request_changes=False,
     )
+    app = make_app(loop)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
-        prompt_input.value = "持续调用工具"
+        prompt_input.value = "规划任务"
         await pilot.press("enter")
-        await app.workers.wait_for_complete()
         await pilot.pause()
 
-    assert tool.values == list(range(1, MAX_TOOL_CALLS_PER_TURN + 1))
-    assert len(provider.received_tools) == MAX_TOOL_CALLS_PER_TURN + 1
-    assert all(
-        tools is not None
-        for tools in provider.received_tools[:MAX_TOOL_CALLS_PER_TURN]
-    )
-    assert provider.received_tools[-1] is None
-    assert history.snapshot()[-1] == ChatMessage(
-        role="assistant",
-        content="已根据现有结果总结",
-    )
-    assert prompt_input.disabled is False
+        assert app.screen.query_one("#execute-current", Button).disabled is True
+        assert app.screen.query_one("#request-changes", Button).disabled is True
+        assert "当前请求已达到 15 轮上限" in str(
+            app.screen.query_one("#round-limit-message", Static).render()
+        )
+
+        await pilot.click("#reject-plan")
+        await app.workers.wait_for_complete()
+
+    assert loop.resolution == PlanApprovalResolution("reject")
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_skips_batch_calls_beyond_limit() -> None:
-    provider = OversizedBatchProvider()
-    tool = CountingTool()
-    registry = ToolRegistry()
-    registry.register(tool)
-    history = ConversationHistory()
-    app = ChatApp(
-        provider,
-        history,
-        provider_id="deepseek_openai",
-        model="deepseek-v4-pro",
-        tool_registry=registry,
-    )
+async def test_escape_cancels_active_approval_wait() -> None:
+    loop = ToolApprovalAgentLoop()
+    app = make_app(loop)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
-        prompt_input.value = "一次请求超过工具上限"
+        prompt_input.value = "执行写工具"
         await pilot.press("enter")
-        await app.workers.wait_for_complete()
         await pilot.pause()
+        await pilot.press("escape")
+        await app.workers.wait_for_complete()
 
-    assert tool.values == list(range(1, MAX_TOOL_CALLS_PER_TURN + 1))
-    skipped_result = next(
-        message
-        for message in history.snapshot()
-        if message.tool_call_id == f"batch_{MAX_TOOL_CALLS_PER_TURN + 1}"
-    )
-    assert '"code":"tool_limit_reached"' in skipped_result.content
-    assert provider.request_count == 2
-    assert history.snapshot()[-1].content == "批量调用处理完成"
+        assert prompt_input.disabled is False
+        assert prompt_input.has_focus is True
+
+    assert loop.cancelled is True

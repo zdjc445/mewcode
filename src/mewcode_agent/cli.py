@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from mewcode_agent.agent import AgentLoop
 from mewcode_agent.app import ChatApp
 from mewcode_agent.config import ConfigError, load_config
 from mewcode_agent.history import ConversationHistory
@@ -25,12 +26,13 @@ def main() -> int:
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
 
+    registry = create_core_registry()
+    agent_loop = AgentLoop(provider, registry)
     app = ChatApp(
-        provider,
+        agent_loop,
         ConversationHistory(),
         provider_id=provider_config.provider_id,
         model=provider_config.model,
-        tool_registry=create_core_registry(),
     )
     app.run()
     return 0
