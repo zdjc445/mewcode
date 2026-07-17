@@ -28,9 +28,12 @@ from mewcode_agent.agent.tool_scheduler import (
     ToolScheduler,
     ToolSchedulerEvent,
 )
+from mewcode_agent.agent.loop import AgentLoop, AgentLoopConfig
 
 __all__ = [
     "AgentEvent",
+    "AgentLoop",
+    "AgentLoopConfig",
     "AgentRunContext",
     "AgentRunMode",
     "AgentRunState",
