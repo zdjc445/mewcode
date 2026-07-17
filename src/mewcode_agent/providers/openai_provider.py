@@ -9,8 +9,23 @@ import openai
 from openai import AsyncOpenAI
 
 from mewcode_agent.config import ProviderConfig
-from mewcode_agent.models import ChatMessage, ToolCall
-from mewcode_agent.providers.base import ProviderError, StreamPart
+from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
+from mewcode_agent.providers.base import (
+    ProviderError,
+    ProviderStopReason,
+    ProviderStreamEvent,
+    ProviderTextDelta,
+    ProviderThinkingComplete,
+    ProviderThinkingDelta,
+    ProviderToolCall,
+    ProviderTurnEnd,
+)
+
+OPENAI_STOP_REASON_MAP: dict[str, ProviderStopReason] = {
+    "stop": "end_turn",
+    "tool_calls": "tool_calls",
+    "length": "max_tokens",
+}
 
 
 class OpenAIProvider:
@@ -32,27 +47,36 @@ class OpenAIProvider:
         return "openai"
 
     @staticmethod
-    def _request_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
-        request_messages: list[dict[str, Any]] = []
+    def _request_messages(
+        messages: list[ChatMessage],
+        *,
+        system_prompt: str,
+    ) -> list[dict[str, Any]]:
+        request_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt}
+        ]
         for message in messages:
             if message.role == "assistant" and message.tool_calls:
-                request_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": message.content or None,
-                        "tool_calls": [
-                            {
-                                "id": call.call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": call.name,
-                                    "arguments": call.arguments_json,
-                                },
-                            }
-                            for call in message.tool_calls
-                        ],
-                    }
-                )
+                payload: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": message.content or None,
+                    "tool_calls": [
+                        {
+                            "id": call.call_id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": call.arguments_json,
+                            },
+                        }
+                        for call in message.tool_calls
+                    ],
+                }
+                if message.thinking_blocks:
+                    payload["reasoning_content"] = "".join(
+                        block.text for block in message.thinking_blocks
+                    )
+                request_messages.append(payload)
             elif message.role == "tool":
                 request_messages.append(
                     {
@@ -72,10 +96,15 @@ class OpenAIProvider:
         messages: list[ChatMessage],
         *,
         tools: list[dict[str, Any]] | None = None,
-    ) -> AsyncIterator[StreamPart]:
-        request_messages = self._request_messages(messages)
-        received_text = False
+        system_prompt: str,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        request_messages = self._request_messages(
+            messages,
+            system_prompt=system_prompt,
+        )
+        reasoning_parts: list[str] = []
         streamed_tool_calls: dict[int, dict[str, str]] = {}
+        finish_reason: str | None = None
 
         try:
             request: dict[str, Any] = dict(
@@ -90,12 +119,15 @@ class OpenAIProvider:
             async for chunk in stream:
                 if not chunk.choices:
                     continue
-                delta = chunk.choices[0].delta
+                choice = chunk.choices[0]
+                delta = choice.delta
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                    yield ProviderThinkingDelta(reasoning)
                 text = getattr(delta, "content", None)
                 if text:
-                    if text.strip():
-                        received_text = True
-                    yield text
+                    yield ProviderTextDelta(text)
                 for fragment in getattr(delta, "tool_calls", None) or []:
                     current = streamed_tool_calls.setdefault(
                         fragment.index,
@@ -109,7 +141,15 @@ class OpenAIProvider:
                             current["name"] += function.name
                         if function.arguments:
                             current["arguments"] += function.arguments
+                finish_reason = (
+                    getattr(choice, "finish_reason", None) or finish_reason
+                )
 
+            reasoning_text = "".join(reasoning_parts)
+            if reasoning_text.strip():
+                yield ProviderThinkingComplete(
+                    ThinkingBlock(reasoning_text)
+                )
             if streamed_tool_calls:
                 try:
                     tool_calls = tuple(
@@ -123,9 +163,10 @@ class OpenAIProvider:
                 except ValueError as exc:
                     raise ProviderError("模型返回了不完整的工具调用") from exc
                 for tool_call in tool_calls:
-                    yield tool_call
-            elif not received_text:
-                raise ProviderError("OpenAI 兼容接口返回了空响应")
+                    yield ProviderToolCall(tool_call)
+            yield ProviderTurnEnd(
+                OPENAI_STOP_REASON_MAP.get(finish_reason or "", "other")
+            )
         except ProviderError:
             raise
         except openai.AuthenticationError as exc:

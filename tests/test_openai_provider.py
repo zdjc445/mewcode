@@ -7,8 +7,16 @@ from typing import Any
 import pytest
 
 from mewcode_agent.config import ProviderConfig
-from mewcode_agent.models import ChatMessage, ToolCall
-from mewcode_agent.providers.base import ProviderError
+from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
+from mewcode_agent.providers.base import (
+    ProviderError,
+    ProviderStreamEvent,
+    ProviderTextDelta,
+    ProviderThinkingComplete,
+    ProviderThinkingDelta,
+    ProviderToolCall,
+    ProviderTurnEnd,
+)
 from mewcode_agent.providers.openai_provider import OpenAIProvider
 
 
@@ -41,10 +49,23 @@ class FakeOpenAICreate:
         return self.stream
 
 
-def make_chunk(text: str | None, *, with_choices: bool = True) -> Any:
-    choices = []
+def make_chunk(
+    text: str | None,
+    *,
+    reasoning_content: str | None = None,
+    finish_reason: str | None = None,
+    with_choices: bool = True,
+) -> Any:
+    choices: list[Any] = []
     if with_choices:
-        choices.append(SimpleNamespace(delta=SimpleNamespace(content=text)))
+        delta = SimpleNamespace(
+            content=text,
+            reasoning_content=reasoning_content,
+            tool_calls=None,
+        )
+        choices.append(
+            SimpleNamespace(delta=delta, finish_reason=finish_reason)
+        )
     return SimpleNamespace(choices=choices)
 
 
@@ -54,9 +75,11 @@ def make_tool_chunk(
     call_id: str | None,
     name: str | None,
     arguments: str | None,
+    finish_reason: str | None = None,
 ) -> Any:
     delta = SimpleNamespace(
         content=None,
+        reasoning_content=None,
         tool_calls=[
             SimpleNamespace(
                 index=index,
@@ -65,7 +88,8 @@ def make_tool_chunk(
             )
         ],
     )
-    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice])
 
 
 def make_client(create: FakeOpenAICreate) -> Any:
@@ -76,11 +100,12 @@ def make_client(create: FakeOpenAICreate) -> Any:
     )
 
 
-async def collect(provider: OpenAIProvider) -> list[str]:
+async def collect(provider: OpenAIProvider) -> list[ProviderStreamEvent]:
     return [
-        part
-        async for part in provider.stream_chat(
-            [ChatMessage(role="user", content="你好")]
+        event
+        async for event in provider.stream_chat(
+            [ChatMessage(role="user", content="你好")],
+            system_prompt="system text",
         )
     ]
 
@@ -91,7 +116,12 @@ async def test_openai_provider_streams_text_and_request_shape(
 ) -> None:
     create = FakeOpenAICreate(
         FakeOpenAIStream(
-            [make_chunk(None), make_chunk("你"), make_chunk("好"), make_chunk("", with_choices=False)]
+            [
+                make_chunk(None),
+                make_chunk("你"),
+                make_chunk("好", finish_reason="stop"),
+                make_chunk("", with_choices=False),
+            ]
         )
     )
     provider = OpenAIProvider(
@@ -100,15 +130,50 @@ async def test_openai_provider_streams_text_and_request_shape(
         client=make_client(create),
     )
 
-    parts = await collect(provider)
+    events = await collect(provider)
 
-    assert parts == ["你", "好"]
+    assert events == [
+        ProviderTextDelta("你"),
+        ProviderTextDelta("好"),
+        ProviderTurnEnd("end_turn"),
+    ]
     assert create.kwargs == {
         "model": "deepseek-v4-pro",
-        "messages": [{"role": "user", "content": "你好"}],
+        "messages": [
+            {"role": "system", "content": "system text"},
+            {"role": "user", "content": "你好"},
+        ],
         "max_tokens": 4096,
         "stream": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_maps_thinking_text_and_stop_reason(
+    openai_config: ProviderConfig,
+) -> None:
+    create = FakeOpenAICreate(
+        FakeOpenAIStream(
+            [
+                make_chunk(None, reasoning_content="先分析"),
+                make_chunk("答案", finish_reason="stop"),
+            ]
+        )
+    )
+    provider = OpenAIProvider(
+        openai_config,
+        "test-secret",
+        client=make_client(create),
+    )
+
+    events = await collect(provider)
+
+    assert events == [
+        ProviderThinkingDelta("先分析"),
+        ProviderTextDelta("答案"),
+        ProviderThinkingComplete(ThinkingBlock("先分析")),
+        ProviderTurnEnd("end_turn"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -129,31 +194,43 @@ async def test_openai_provider_assembles_streamed_tool_call(
                     call_id=None,
                     name="file",
                     arguments='th":"README.md"}',
+                    finish_reason="tool_calls",
                 ),
             ]
         )
     )
-    provider = OpenAIProvider(openai_config, "test-secret", client=make_client(create))
+    provider = OpenAIProvider(
+        openai_config,
+        "test-secret",
+        client=make_client(create),
+    )
     tools = [{"type": "function", "function": {"name": "read_file"}}]
 
-    parts = [
-        part
-        async for part in provider.stream_chat(
+    events = [
+        event
+        async for event in provider.stream_chat(
             [ChatMessage(role="user", content="读取 README")],
             tools=tools,
+            system_prompt="system text",
         )
     ]
 
-    assert parts == [
-        ToolCall(
-            call_id="call_1",
-            name="read_file",
-            arguments_json='{"path":"README.md"}',
-        )
+    assert events == [
+        ProviderToolCall(
+            ToolCall(
+                call_id="call_1",
+                name="read_file",
+                arguments_json='{"path":"README.md"}',
+            )
+        ),
+        ProviderTurnEnd("tool_calls"),
     ]
     assert create.kwargs == {
         "model": "deepseek-v4-pro",
-        "messages": [{"role": "user", "content": "读取 README"}],
+        "messages": [
+            {"role": "system", "content": "system text"},
+            {"role": "user", "content": "读取 README"},
+        ],
         "max_tokens": 4096,
         "stream": True,
         "tools": tools,
@@ -178,37 +255,58 @@ async def test_openai_provider_returns_multiple_tool_calls_in_index_order(
                     call_id="call_1",
                     name="read_file",
                     arguments='{"path":"one"}',
+                    finish_reason="tool_calls",
                 ),
             ]
         )
     )
-    provider = OpenAIProvider(openai_config, "test-secret", client=make_client(create))
+    provider = OpenAIProvider(
+        openai_config,
+        "test-secret",
+        client=make_client(create),
+    )
 
-    parts = [
-        part
-        async for part in provider.stream_chat(
+    events = [
+        event
+        async for event in provider.stream_chat(
             [ChatMessage(role="user", content="读取两个文件")],
             tools=[{"type": "function", "function": {"name": "read_file"}}],
+            system_prompt="system text",
         )
     ]
 
-    assert parts == [
-        ToolCall("call_1", "read_file", '{"path":"one"}'),
-        ToolCall("call_2", "read_file", '{"path":"two"}'),
+    assert events == [
+        ProviderToolCall(ToolCall("call_1", "read_file", '{"path":"one"}')),
+        ProviderToolCall(ToolCall("call_2", "read_file", '{"path":"two"}')),
+        ProviderTurnEnd("tool_calls"),
     ]
 
 
-def test_openai_provider_serializes_tool_history() -> None:
+def test_openai_provider_serializes_tool_history_with_reasoning() -> None:
     call = ToolCall("call_1", "read_file", '{"path":"README.md"}')
 
     request = OpenAIProvider._request_messages(
         [
-            ChatMessage(role="assistant", content="", tool_calls=(call,)),
-            ChatMessage(role="tool", content='{"success":true}', tool_call_id="call_1"),
-        ]
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=(call,),
+                thinking_blocks=(
+                    ThinkingBlock("先分析"),
+                    ThinkingBlock("再调用"),
+                ),
+            ),
+            ChatMessage(
+                role="tool",
+                content='{"success":true}',
+                tool_call_id="call_1",
+            ),
+        ],
+        system_prompt="system text",
     )
 
     assert request == [
+        {"role": "system", "content": "system text"},
         {
             "role": "assistant",
             "content": None,
@@ -222,13 +320,18 @@ def test_openai_provider_serializes_tool_history() -> None:
                     },
                 }
             ],
+            "reasoning_content": "先分析再调用",
         },
-        {"role": "tool", "tool_call_id": "call_1", "content": '{"success":true}'},
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": '{"success":true}',
+        },
     ]
 
 
 @pytest.mark.asyncio
-async def test_openai_provider_rejects_empty_response(
+async def test_openai_provider_leaves_empty_response_for_agent_validation(
     openai_config: ProviderConfig,
 ) -> None:
     create = FakeOpenAICreate(FakeOpenAIStream([make_chunk(None)]))
@@ -238,22 +341,82 @@ async def test_openai_provider_rejects_empty_response(
         client=make_client(create),
     )
 
-    with pytest.raises(ProviderError, match="空响应"):
-        await collect(provider)
+    assert await collect(provider) == [ProviderTurnEnd("other")]
 
 
 @pytest.mark.asyncio
-async def test_openai_provider_rejects_whitespace_only_response(
+async def test_openai_provider_preserves_whitespace_text_delta(
     openai_config: ProviderConfig,
 ) -> None:
-    create = FakeOpenAICreate(FakeOpenAIStream([make_chunk("  \n")]))
+    create = FakeOpenAICreate(
+        FakeOpenAIStream([make_chunk("  \n", finish_reason="stop")])
+    )
     provider = OpenAIProvider(
         openai_config,
         "test-secret",
         client=make_client(create),
     )
 
-    with pytest.raises(ProviderError, match="空响应"):
+    assert await collect(provider) == [
+        ProviderTextDelta("  \n"),
+        ProviderTurnEnd("end_turn"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_reason", "expected"),
+    [
+        ("stop", "end_turn"),
+        ("tool_calls", "tool_calls"),
+        ("length", "max_tokens"),
+        ("content_filter", "other"),
+        (None, "other"),
+    ],
+)
+async def test_openai_provider_maps_finish_reason(
+    openai_config: ProviderConfig,
+    raw_reason: str | None,
+    expected: str,
+) -> None:
+    create = FakeOpenAICreate(
+        FakeOpenAIStream([make_chunk("x", finish_reason=raw_reason)])
+    )
+    provider = OpenAIProvider(
+        openai_config,
+        "test-secret",
+        client=make_client(create),
+    )
+
+    events = await collect(provider)
+
+    assert events[-1] == ProviderTurnEnd(expected)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_rejects_incomplete_tool_call(
+    openai_config: ProviderConfig,
+) -> None:
+    create = FakeOpenAICreate(
+        FakeOpenAIStream(
+            [
+                make_tool_chunk(
+                    index=0,
+                    call_id=None,
+                    name="read_file",
+                    arguments="{}",
+                    finish_reason="tool_calls",
+                )
+            ]
+        )
+    )
+    provider = OpenAIProvider(
+        openai_config,
+        "test-secret",
+        client=make_client(create),
+    )
+
+    with pytest.raises(ProviderError, match="不完整的工具调用"):
         await collect(provider)
 
 
