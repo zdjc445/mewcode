@@ -21,6 +21,14 @@ from mewcode_agent.tools import (
 )
 
 
+async def _read_file(registry: ToolRegistry, path: Path | str) -> None:
+    result = await registry.execute(
+        "read_file",
+        json.dumps({"path": str(path)}),
+    )
+    assert result.success is True
+
+
 @pytest.mark.asyncio
 async def test_read_and_write_file_tools(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "example.txt"
@@ -125,6 +133,7 @@ async def test_edit_file_applies_multiple_exact_matches_in_order(
     path = tmp_path / "example.txt"
     path.write_text("first\nmiddle\nlast\n", encoding="utf-8")
     registry = create_core_registry()
+    await _read_file(registry, path)
 
     result = await registry.execute(
         "edit_file",
@@ -155,8 +164,10 @@ async def test_edit_file_applies_multiple_exact_matches_in_order(
 async def test_edit_file_each_edit_sees_previous_edit_output(tmp_path: Path) -> None:
     path = tmp_path / "example.txt"
     path.write_text("old", encoding="utf-8")
+    registry = create_core_registry()
+    await _read_file(registry, path)
 
-    result = await create_core_registry().execute(
+    result = await registry.execute(
         "edit_file",
         json.dumps(
             {
@@ -184,8 +195,10 @@ async def test_edit_file_returns_empty_diff_for_unchanged_content(
 ) -> None:
     path = tmp_path / "example.txt"
     path.write_text("unchanged\n", encoding="utf-8")
+    registry = create_core_registry()
+    await _read_file(registry, path)
 
-    result = await create_core_registry().execute(
+    result = await registry.execute(
         "edit_file",
         json.dumps(
             {
@@ -210,8 +223,10 @@ async def test_edit_file_truncates_large_diff(tmp_path: Path) -> None:
     old_content = "\n".join(f"old {index}" for index in range(250)) + "\n"
     new_content = "\n".join(f"new {index}" for index in range(250)) + "\n"
     path.write_text(old_content, encoding="utf-8")
+    registry = create_core_registry()
+    await _read_file(registry, path)
 
-    result = await create_core_registry().execute(
+    result = await registry.execute(
         "edit_file",
         json.dumps(
             {
@@ -250,8 +265,10 @@ async def test_edit_file_returns_clear_match_errors(
 ) -> None:
     path = tmp_path / "example.txt"
     path.write_text(content, encoding="utf-8")
+    registry = create_core_registry()
+    await _read_file(registry, path)
 
-    result = await create_core_registry().execute(
+    result = await registry.execute(
         "edit_file",
         json.dumps(
             {
@@ -273,8 +290,10 @@ async def test_edit_file_does_not_write_when_a_later_edit_fails(
     path = tmp_path / "example.txt"
     original = "first\nmiddle\nlast\n"
     path.write_text(original, encoding="utf-8")
+    registry = create_core_registry()
+    await _read_file(registry, path)
 
-    result = await create_core_registry().execute(
+    result = await registry.execute(
         "edit_file",
         json.dumps(
             {
@@ -319,6 +338,180 @@ async def test_edit_file_rejects_invalid_edit_items(
     assert result.success is False
     assert result.error_code == "invalid_arguments"
     assert path.read_text(encoding="utf-8") == "old"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_rejects_existing_file_that_was_not_read(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("original", encoding="utf-8")
+
+    result = await create_core_registry().execute(
+        "edit_file",
+        json.dumps(
+            {
+                "path": str(path),
+                "edits": [{"old_text": "original", "new_text": "changed"}],
+            }
+        ),
+    )
+
+    assert result.success is False
+    assert result.error_code == "file_not_read"
+    assert result.error_message == "文件尚未读取，请先使用 read_file"
+    assert path.read_text(encoding="utf-8") == "original"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_reports_missing_file(tmp_path: Path) -> None:
+    path = tmp_path / "missing.txt"
+
+    result = await create_core_registry().execute(
+        "edit_file",
+        json.dumps(
+            {
+                "path": str(path),
+                "edits": [{"old_text": "old", "new_text": "new"}],
+            }
+        ),
+    )
+
+    assert result.success is False
+    assert result.error_code == "file_not_found"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_rejects_file_changed_after_read(tmp_path: Path) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("original", encoding="utf-8")
+    registry = create_core_registry()
+    await _read_file(registry, path)
+    path.write_text("externally changed content", encoding="utf-8")
+
+    result = await registry.execute(
+        "edit_file",
+        json.dumps(
+            {
+                "path": str(path),
+                "edits": [{"old_text": "original", "new_text": "changed"}],
+            }
+        ),
+    )
+
+    assert result.success is False
+    assert result.error_code == "file_changed_since_read"
+    assert result.error_message == "文件在读取后已被修改，请重新读取"
+    assert path.read_text(encoding="utf-8") == "externally changed content"
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejects_existing_file_that_was_not_read(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("original", encoding="utf-8")
+
+    result = await create_core_registry().execute(
+        "write_file",
+        json.dumps({"path": str(path), "content": "changed"}),
+    )
+
+    assert result.success is False
+    assert result.error_code == "file_not_read"
+    assert path.read_text(encoding="utf-8") == "original"
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejects_file_changed_after_read(tmp_path: Path) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("original", encoding="utf-8")
+    registry = create_core_registry()
+    await _read_file(registry, path)
+    path.write_text("externally changed content", encoding="utf-8")
+
+    result = await registry.execute(
+        "write_file",
+        json.dumps({"path": str(path), "content": "tool write"}),
+    )
+
+    assert result.success is False
+    assert result.error_code == "file_changed_since_read"
+    assert path.read_text(encoding="utf-8") == "externally changed content"
+
+
+@pytest.mark.asyncio
+async def test_successful_write_refreshes_cached_file_state(tmp_path: Path) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("original", encoding="utf-8")
+    registry = create_core_registry()
+    await _read_file(registry, path)
+
+    first = await registry.execute(
+        "write_file",
+        json.dumps({"path": str(path), "content": "first write"}),
+    )
+    second = await registry.execute(
+        "write_file",
+        json.dumps({"path": str(path), "content": "second write"}),
+    )
+
+    assert first.success is True
+    assert second.success is True
+    assert path.read_text(encoding="utf-8") == "second write"
+
+
+@pytest.mark.asyncio
+async def test_successful_edit_refreshes_cached_file_state(tmp_path: Path) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("first", encoding="utf-8")
+    registry = create_core_registry()
+    await _read_file(registry, path)
+
+    first = await registry.execute(
+        "edit_file",
+        json.dumps(
+            {
+                "path": str(path),
+                "edits": [{"old_text": "first", "new_text": "second"}],
+            }
+        ),
+    )
+    second = await registry.execute(
+        "edit_file",
+        json.dumps(
+            {
+                "path": str(path),
+                "edits": [{"old_text": "second", "new_text": "third"}],
+            }
+        ),
+    )
+
+    assert first.success is True
+    assert second.success is True
+    assert path.read_text(encoding="utf-8") == "third"
+
+
+@pytest.mark.asyncio
+async def test_file_state_uses_resolved_paths(tmp_path: Path) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("original", encoding="utf-8")
+    relative_path = path.relative_to(Path.cwd())
+    registry = create_core_registry()
+    await _read_file(registry, relative_path)
+
+    result = await registry.execute(
+        "edit_file",
+        json.dumps(
+            {
+                "path": str(path.resolve()),
+                "edits": [{"old_text": "original", "new_text": "changed"}],
+            }
+        ),
+    )
+
+    assert result.success is True
+    assert path.read_text(encoding="utf-8") == "changed"
 
 
 @pytest.mark.asyncio

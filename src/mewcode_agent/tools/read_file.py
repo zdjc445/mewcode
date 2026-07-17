@@ -7,6 +7,7 @@ from typing import Any
 
 from mewcode_agent.tools._paths import expand_path
 from mewcode_agent.tools.base import Tool, ToolExecutionError, validate_arguments
+from mewcode_agent.tools.file_state_cache import FileStateCache
 
 
 MAX_READ_LINES = 2000
@@ -16,6 +17,7 @@ class ReadFileTool(Tool):
     name = "read_file"
     description = (
         "按行读取 UTF-8 文本文件，支持使用 offset 和 limit 分页。"
+        "成功读取后记录文件状态，供 write_file 和 edit_file 做修改前校验。"
         "path 可以是相对路径或绝对路径。"
     )
     parameters = {
@@ -43,6 +45,9 @@ class ReadFileTool(Tool):
         "additionalProperties": False,
     }
 
+    def __init__(self, file_state_cache: FileStateCache) -> None:
+        self._file_state_cache = file_state_cache
+
     async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         validate_arguments(
             arguments,
@@ -63,7 +68,13 @@ class ReadFileTool(Tool):
             )
 
         path = expand_path(arguments["path"])
-        content = await asyncio.to_thread(path.read_text, encoding="utf-8")
+
+        def read() -> str:
+            content = path.read_text(encoding="utf-8")
+            self._file_state_cache.record(path)
+            return content
+
+        content = await asyncio.to_thread(read)
         lines = content.splitlines(keepends=True)
         selected = lines[offset : offset + limit]
         next_offset = offset + len(selected)

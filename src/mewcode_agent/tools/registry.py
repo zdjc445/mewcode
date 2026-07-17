@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from mewcode_agent.tools.base import Tool, ToolExecutionError, ToolResult
 from mewcode_agent.tools.edit_file import EditFileTool
+from mewcode_agent.tools.file_state_cache import FileStateCache
 from mewcode_agent.tools.find_files import FindFilesTool
 from mewcode_agent.tools.read_file import ReadFileTool
 from mewcode_agent.tools.run_command import RunCommandTool
@@ -138,14 +139,15 @@ class ToolRegistry:
 
 def create_core_registry() -> ToolRegistry:
     registry = ToolRegistry()
-    tool_types = (
-        ReadFileTool,
-        WriteFileTool,
-        EditFileTool,
-        RunCommandTool,
-        FindFilesTool,
-        SearchCodeTool,
+    file_state_cache = FileStateCache()
+    tools = (
+        ReadFileTool(file_state_cache),
+        WriteFileTool(file_state_cache),
+        EditFileTool(file_state_cache),
+        RunCommandTool(),
+        FindFilesTool(),
+        SearchCodeTool(),
     )
-    for tool_type in tool_types:
-        registry.register(tool_type())
+    for tool in tools:
+        registry.register(tool)
     return registry

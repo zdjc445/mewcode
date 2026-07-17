@@ -8,6 +8,7 @@ from typing import Any
 from mewcode_agent.tools._paths import expand_path
 from mewcode_agent.tools.base import Tool, ToolExecutionError, validate_arguments
 from mewcode_agent.tools.diff import DiffResult, build_diff
+from mewcode_agent.tools.file_state_cache import FileStateCache
 
 
 class EditFileTool(Tool):
@@ -15,6 +16,7 @@ class EditFileTool(Tool):
     description = (
         "在 UTF-8 文本文件中按顺序进行多段原文替换。每项 old_text 必须在处理到该项时"
         "恰好出现一次；任意一项未匹配或多次匹配时，整个文件保持不变。"
+        "文件必须先通过 read_file 读取且读取后未被修改。"
         "成功时返回统一 diff 和增删行数。"
     )
     parameters = {
@@ -48,6 +50,9 @@ class EditFileTool(Tool):
         "required": ["path", "edits"],
         "additionalProperties": False,
     }
+
+    def __init__(self, file_state_cache: FileStateCache) -> None:
+        self._file_state_cache = file_state_cache
 
     async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         validate_arguments(
@@ -90,6 +95,7 @@ class EditFileTool(Tool):
             validated_edits.append((old_text, edit_arguments["new_text"]))
 
         def edit() -> DiffResult:
+            self._file_state_cache.ensure_current(path)
             old_content = path.read_text(encoding="utf-8")
             new_content = old_content
             for index, (old_text, new_text) in enumerate(validated_edits):
@@ -110,6 +116,7 @@ class EditFileTool(Tool):
                 new_content = new_content.replace(old_text, new_text, 1)
             diff = build_diff(old_content, new_content)
             path.write_text(new_content, encoding="utf-8")
+            self._file_state_cache.record(path)
             return diff
 
         diff = await asyncio.to_thread(edit)
