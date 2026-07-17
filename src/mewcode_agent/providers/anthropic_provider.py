@@ -10,8 +10,23 @@ import anthropic
 from anthropic import AsyncAnthropic
 
 from mewcode_agent.config import ProviderConfig
-from mewcode_agent.models import ChatMessage, ToolCall
-from mewcode_agent.providers.base import ProviderError, StreamPart
+from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
+from mewcode_agent.providers.base import (
+    ProviderError,
+    ProviderStopReason,
+    ProviderStreamEvent,
+    ProviderTextDelta,
+    ProviderThinkingComplete,
+    ProviderThinkingDelta,
+    ProviderToolCall,
+    ProviderTurnEnd,
+)
+
+ANTHROPIC_STOP_REASON_MAP: dict[str, ProviderStopReason] = {
+    "end_turn": "end_turn",
+    "tool_use": "tool_calls",
+    "max_tokens": "max_tokens",
+}
 
 
 class AnthropicProvider:
@@ -38,6 +53,14 @@ class AnthropicProvider:
         for message in messages:
             if message.role == "assistant" and message.tool_calls:
                 content: list[dict[str, Any]] = []
+                for block in message.thinking_blocks:
+                    content.append(
+                        {
+                            "type": "thinking",
+                            "thinking": block.text,
+                            "signature": block.signature,
+                        }
+                    )
                 if message.content:
                     content.append({"type": "text", "text": message.content})
                 for call in message.tool_calls:
@@ -88,57 +111,96 @@ class AnthropicProvider:
         messages: list[ChatMessage],
         *,
         tools: list[dict[str, Any]] | None = None,
-    ) -> AsyncIterator[StreamPart]:
+        system_prompt: str,
+    ) -> AsyncIterator[ProviderStreamEvent]:
         request_messages = self._request_messages(messages)
-        received_text = False
+        thinking_blocks: dict[int, dict[str, str]] = {}
         streamed_tool_calls: dict[int, dict[str, str]] = {}
+        stop_reason: str | None = None
 
         try:
             request: dict[str, Any] = dict(
                 model=self._config.model,
                 messages=request_messages,
                 max_tokens=self._config.max_tokens,
+                system=system_prompt,
             )
             if tools:
                 request["tools"] = tools
                 request["tool_choice"] = {"type": "auto"}
             async with self._client.messages.stream(**request) as stream:
-                if not tools:
-                    async for text in stream.text_stream:
-                        if text:
-                            if text.strip():
-                                received_text = True
-                            yield text
-                else:
-                    async for event in stream:
-                        if event.type == "content_block_start":
-                            block = event.content_block
-                            if block.type == "tool_use":
-                                initial_input = ""
-                                if block.input:
-                                    initial_input = json.dumps(
-                                        block.input,
-                                        ensure_ascii=False,
-                                        separators=(",", ":"),
-                                    )
-                                streamed_tool_calls[event.index] = {
-                                    "id": block.id,
-                                    "name": block.name,
-                                    "arguments": initial_input,
-                                }
-                        elif event.type == "content_block_delta":
-                            delta = event.delta
-                            if delta.type == "text_delta" and delta.text:
-                                if delta.text.strip():
-                                    received_text = True
-                                yield delta.text
-                            elif delta.type == "input_json_delta":
-                                current = streamed_tool_calls.get(event.index)
-                                if current is None:
-                                    raise ProviderError(
-                                        "Anthropic 兼容接口返回了无起始块的工具参数"
-                                    )
-                                current["arguments"] += delta.partial_json
+                async for event in stream:
+                    if event.type == "content_block_start":
+                        block = event.content_block
+                        if block.type == "thinking":
+                            initial_text = (
+                                getattr(block, "thinking", "") or ""
+                            )
+                            thinking_blocks[event.index] = {
+                                "text": initial_text,
+                                "signature": (
+                                    getattr(block, "signature", "") or ""
+                                ),
+                            }
+                            if initial_text:
+                                yield ProviderThinkingDelta(initial_text)
+                        elif block.type == "tool_use":
+                            initial_input = ""
+                            if block.input:
+                                initial_input = json.dumps(
+                                    block.input,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                            streamed_tool_calls[event.index] = {
+                                "id": block.id,
+                                "name": block.name,
+                                "arguments": initial_input,
+                            }
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        if delta.type == "text_delta" and delta.text:
+                            yield ProviderTextDelta(delta.text)
+                        elif delta.type == "thinking_delta":
+                            current = thinking_blocks.get(event.index)
+                            if current is None:
+                                raise ProviderError(
+                                    "Anthropic 兼容接口返回了无起始块的 thinking"
+                                )
+                            if delta.thinking:
+                                current["text"] += delta.thinking
+                                yield ProviderThinkingDelta(delta.thinking)
+                        elif delta.type == "signature_delta":
+                            current = thinking_blocks.get(event.index)
+                            if current is None:
+                                raise ProviderError(
+                                    "Anthropic 兼容接口返回了无起始块的 signature"
+                                )
+                            current["signature"] += delta.signature
+                        elif delta.type == "input_json_delta":
+                            current = streamed_tool_calls.get(event.index)
+                            if current is None:
+                                raise ProviderError(
+                                    "Anthropic 兼容接口返回了无起始块的工具参数"
+                                )
+                            current["arguments"] += delta.partial_json
+                    elif event.type == "content_block_stop":
+                        raw_block = thinking_blocks.pop(event.index, None)
+                        if (
+                            raw_block is not None
+                            and raw_block["text"].strip()
+                        ):
+                            yield ProviderThinkingComplete(
+                                ThinkingBlock(
+                                    raw_block["text"],
+                                    raw_block["signature"],
+                                )
+                            )
+                    elif event.type == "message_delta":
+                        stop_reason = (
+                            getattr(event.delta, "stop_reason", None)
+                            or stop_reason
+                        )
 
             if streamed_tool_calls:
                 try:
@@ -153,9 +215,10 @@ class AnthropicProvider:
                 except ValueError as exc:
                     raise ProviderError("模型返回了不完整的工具调用") from exc
                 for tool_call in tool_calls:
-                    yield tool_call
-            elif not received_text:
-                raise ProviderError("Anthropic 兼容接口返回了空响应")
+                    yield ProviderToolCall(tool_call)
+            yield ProviderTurnEnd(
+                ANTHROPIC_STOP_REASON_MAP.get(stop_reason or "", "other")
+            )
         except ProviderError:
             raise
         except anthropic.AuthenticationError as exc:

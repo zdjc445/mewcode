@@ -48,9 +48,6 @@ ProviderStreamEvent: TypeAlias = (
     | ProviderTurnEnd
 )
 
-# Removed after the Anthropic adapter migrates to ProviderStreamEvent.
-StreamPart: TypeAlias = ProviderStreamEvent
-
 
 class ProviderError(RuntimeError):
     """A sanitized provider failure safe to display in the TUI."""
