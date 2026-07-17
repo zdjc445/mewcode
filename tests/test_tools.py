@@ -41,7 +41,81 @@ async def test_read_and_write_file_tools(tmp_path: Path) -> None:
     assert read.data == {
         "path": str(path.resolve()),
         "content": "第一行\n第二行",
+        "offset": 0,
+        "limit": 2000,
+        "total_lines": 2,
+        "has_more": False,
+        "next_offset": 2,
     }
+
+
+@pytest.mark.asyncio
+async def test_read_file_supports_line_pagination(tmp_path: Path) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text(
+        "line 1\nline 2\nline 3\nline 4\nline 5\n",
+        encoding="utf-8",
+    )
+    registry = create_core_registry()
+
+    first = await registry.execute(
+        "read_file",
+        json.dumps({"path": str(path), "offset": 1, "limit": 2}),
+    )
+    last = await registry.execute(
+        "read_file",
+        json.dumps({"path": str(path), "offset": 3, "limit": 2}),
+    )
+    beyond_end = await registry.execute(
+        "read_file",
+        json.dumps({"path": str(path), "offset": 8, "limit": 2}),
+    )
+
+    assert first.success is True
+    assert first.data == {
+        "path": str(path.resolve()),
+        "content": "line 2\nline 3\n",
+        "offset": 1,
+        "limit": 2,
+        "total_lines": 5,
+        "has_more": True,
+        "next_offset": 3,
+    }
+    assert last.success is True
+    assert last.data["content"] == "line 4\nline 5\n"
+    assert last.data["has_more"] is False
+    assert last.data["next_offset"] == 5
+    assert beyond_end.success is True
+    assert beyond_end.data["content"] == ""
+    assert beyond_end.data["has_more"] is False
+    assert beyond_end.data["next_offset"] == 8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pagination",
+    [
+        {"offset": -1},
+        {"offset": True},
+        {"limit": 0},
+        {"limit": 2001},
+        {"limit": False},
+    ],
+)
+async def test_read_file_rejects_invalid_pagination(
+    tmp_path: Path,
+    pagination: dict[str, Any],
+) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("content", encoding="utf-8")
+
+    result = await create_core_registry().execute(
+        "read_file",
+        json.dumps({"path": str(path), **pagination}),
+    )
+
+    assert result.success is False
+    assert result.error_code == "invalid_arguments"
 
 
 @pytest.mark.asyncio
