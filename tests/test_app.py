@@ -18,12 +18,15 @@ from mewcode_agent.agent import (
     RunCancelledEvent,
     RunErrorEvent,
     ToolApprovalRequestedEvent,
+    ToolCallStartedEvent,
+    ToolResultEvent,
     UserMessageEvent,
 )
 from mewcode_agent.agent.context import AgentRunCancelled
 from mewcode_agent.app import ChatApp
 from mewcode_agent.history import ConversationHistory
-from mewcode_agent.models import ChatMessage
+from mewcode_agent.models import ChatMessage, ToolCall
+from mewcode_agent.tools.base import ToolResult
 
 
 class GatedAgentLoop:
@@ -160,6 +163,47 @@ class PlanApprovalAgentLoop:
             context.finish_run()
 
 
+class GatedToolEventAgentLoop:
+    def __init__(self) -> None:
+        self.tool_started = asyncio.Event()
+        self.release_tool = asyncio.Event()
+        self.result_emitted = asyncio.Event()
+        self.release_result = asyncio.Event()
+
+    async def run(
+        self,
+        user_message: str,
+        history: ConversationHistory,
+        *,
+        plan_only: bool,
+        context: AgentRunContext,
+    ) -> AsyncIterator[AgentEvent]:
+        context.begin_run()
+        history.add_user(user_message)
+        call = ToolCall("call-1", "read_file", '{"path":"README.md"}')
+        result = ToolResult("read_file", True, data={"content": "说明"})
+        try:
+            yield UserMessageEvent(user_message)
+            yield RoundStartedEvent(1, 15, "executing")
+            history.add_assistant_tool_calls("", (call,))
+            yield ToolCallStartedEvent(
+                call.call_id,
+                call.name,
+                call.arguments_json,
+                "read",
+            )
+            self.tool_started.set()
+            await self.release_tool.wait()
+            history.add_tool_result(call.call_id, result)
+            yield ToolResultEvent(call.call_id, result)
+            self.result_emitted.set()
+            await self.release_result.wait()
+            history.add_assistant("读取完成")
+            yield FinalResponseEvent("读取完成", 2)
+        finally:
+            context.finish_run()
+
+
 def make_app(
     loop: object,
     history: ConversationHistory | None = None,
@@ -185,6 +229,7 @@ async def test_app_consumes_agent_events_and_restores_input() -> None:
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
         plan_switch = app.query_one("#plan-only-switch", Switch)
+        assert plan_switch.value is False
         plan_switch.value = True
         prompt_input.value = "记住 42"
         await pilot.press("enter")
@@ -248,6 +293,37 @@ async def test_app_renders_agent_error_without_adding_error_to_history() -> None
         assert history.snapshot() == [
             ChatMessage(role="user", content="触发错误")
         ]
+
+
+@pytest.mark.asyncio
+async def test_app_renders_tool_start_and_result_events() -> None:
+    loop = GatedToolEventAgentLoop()
+    app = make_app(loop)
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "读取说明"
+        await pilot.press("enter")
+        await loop.tool_started.wait()
+        await pilot.pause()
+
+        status = app.query_one("#status", Static)
+        assert "执行工具：read_file" in str(status.render())
+        assert "Assistant → Tool read_file" in render_log_text(
+            app.query_one("#chat-log", RichLog)
+        )
+
+        loop.release_tool.set()
+        await loop.result_emitted.wait()
+        await pilot.pause()
+
+        assert "工具 read_file 完成" in str(status.render())
+        log_text = render_log_text(app.query_one("#chat-log", RichLog))
+        assert "Tool result:" in log_text
+        assert '"tool_name":"read_file","success":true' in log_text
+
+        loop.release_result.set()
+        await app.workers.wait_for_complete()
 
 
 @pytest.mark.asyncio

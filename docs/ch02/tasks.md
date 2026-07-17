@@ -4,20 +4,20 @@
 
 - 规格：已批准，见 `docs/ch02/spec.md`
 - 实施计划：已编写，见 `docs/ch02/plan.md`
-- 实现授权：尚未授权
+- 实现授权：已授权并执行
 - 默认执行方式：在当前工作区按 Task 顺序实施；每个 Task 独立执行 red → green → commit
 
 ## 任务清单
 
-- [ ] Task 1：为六个内置工具加入 `read`、`write`、`command` 精确分类。
-- [ ] Task 2：新增不可变 Agent 事件与一次性 `AgentRunContext`。
-- [ ] Task 3：实现连续读并发、写/命令屏障、审批、拦截器与取消补齐的 `ToolScheduler`。
-- [ ] Task 4：新增 `ThinkingBlock`，并只在 assistant 工具调用历史中保存 thinking 协议元数据。
-- [ ] Task 5：把 OpenAI Provider 改为统一结构化事件流，并保存/回传 `reasoning_content`。
-- [ ] Task 6：把 Anthropic Provider 改为统一结构化事件流，并保存/回传 thinking block 与 `signature`。
-- [ ] Task 7：实现独立 `AgentLoop`、15 轮限制、120 秒 LLM 超时、plan-only 状态机和终止规则。
-- [ ] Task 8：把 Textual 改为 Agent 事件消费者，加入 plan-only 开关、两类审批卡片和取消操作，并更新 CLI 组装。
-- [ ] Task 9：运行全量离线回归、静态检查与文档验收，记录真实证据。
+- [x] Task 1：为六个内置工具加入 `read`、`write`、`command` 精确分类。
+- [x] Task 2：新增不可变 Agent 事件与一次性 `AgentRunContext`。
+- [x] Task 3：实现连续读并发、写/命令屏障、审批、拦截器与取消补齐的 `ToolScheduler`。
+- [x] Task 4：新增 `ThinkingBlock`，并只在 assistant 工具调用历史中保存 thinking 协议元数据。
+- [x] Task 5：把 OpenAI Provider 改为统一结构化事件流，并保存/回传 `reasoning_content`。
+- [x] Task 6：把 Anthropic Provider 改为统一结构化事件流，并保存/回传 thinking block 与 `signature`。
+- [x] Task 7：实现独立 `AgentLoop`、15 轮限制、120 秒 LLM 超时、plan-only 状态机和终止规则。
+- [x] Task 8：把 Textual 改为 Agent 事件消费者，加入 plan-only 开关、两类审批卡片和取消操作，并更新 CLI 组装。
+- [x] Task 9：运行全量离线回归、静态检查与文档验收，记录真实证据。
 
 ## 顺序约束
 

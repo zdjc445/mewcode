@@ -126,6 +126,7 @@ async def test_consecutive_reads_run_concurrently_and_keep_result_order() -> Non
                 ToolCall("call_2", "read_2", "{}"),
             ),
             context=context,
+            plan_only=True,
         )
     )
     await first.started.wait()
@@ -144,6 +145,9 @@ async def test_consecutive_reads_run_concurrently_and_keep_result_order() -> Non
         for event in events
         if isinstance(event, ToolResultEvent)
     ] == ["call_1", "call_2"]
+    assert not any(
+        isinstance(event, ToolApprovalRequestedEvent) for event in events
+    )
 
 
 @pytest.mark.asyncio
