@@ -1,0 +1,16 @@
+default_provider: deepseek_openai
+
+providers:
+  deepseek_openai:
+    protocol: openai
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-v4-pro
+    max_tokens: 4096
+
+  deepseek_anthropic:
+    protocol: anthropic
+    base_url: https://api.deepseek.com/anthropic
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-v4-pro
+    max_tokens: 4096
