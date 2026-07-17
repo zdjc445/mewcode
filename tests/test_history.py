@@ -1,7 +1,7 @@
 import pytest
 
 from mewcode_agent.history import ConversationHistory
-from mewcode_agent.models import ChatMessage
+from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
 
 
 def test_history_keeps_message_order() -> None:
@@ -40,3 +40,24 @@ def test_chat_message_rejects_invalid_role(role: str) -> None:
 def test_chat_message_rejects_blank_content(content: str) -> None:
     with pytest.raises(ValueError, match="content 必须"):
         ChatMessage(role="user", content=content)
+
+
+def test_history_keeps_thinking_on_assistant_tool_call() -> None:
+    history = ConversationHistory()
+    call = ToolCall("call_1", "read_file", '{"path":"README.md"}')
+    block = ThinkingBlock("读取后回答", "sig-1")
+
+    history.add_assistant_tool_calls(
+        "",
+        (call,),
+        thinking_blocks=(block,),
+    )
+
+    assert history.snapshot() == [
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=(call,),
+            thinking_blocks=(block,),
+        )
+    ]

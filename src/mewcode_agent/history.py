@@ -2,7 +2,7 @@
 
 import json
 
-from mewcode_agent.models import ChatMessage, ToolCall
+from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
 from mewcode_agent.tools.base import ToolResult
 
 
@@ -26,13 +26,21 @@ class ConversationHistory:
         self,
         content: str,
         tool_call: ToolCall,
+        *,
+        thinking_blocks: tuple[ThinkingBlock, ...] = (),
     ) -> ChatMessage:
-        return self.add_assistant_tool_calls(content, (tool_call,))
+        return self.add_assistant_tool_calls(
+            content,
+            (tool_call,),
+            thinking_blocks=thinking_blocks,
+        )
 
     def add_assistant_tool_calls(
         self,
         content: str,
         tool_calls: tuple[ToolCall, ...],
+        *,
+        thinking_blocks: tuple[ThinkingBlock, ...] = (),
     ) -> ChatMessage:
         if not tool_calls:
             raise ValueError("tool_calls 不能为空")
@@ -40,6 +48,7 @@ class ConversationHistory:
             role="assistant",
             content=content,
             tool_calls=tool_calls,
+            thinking_blocks=thinking_blocks,
         )
         self._messages.append(message)
         return message

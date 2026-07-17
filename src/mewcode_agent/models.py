@@ -24,6 +24,20 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ThinkingBlock:
+    """One complete reasoning block required by tool-call history."""
+
+    text: str
+    signature: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str) or not self.text.strip():
+            raise ValueError("text 必须为非空字符串")
+        if not isinstance(self.signature, str):
+            raise ValueError("signature 必须为字符串")
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
     """One validated message in the in-memory conversation."""
 
@@ -31,6 +45,7 @@ class ChatMessage:
     content: str
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
+    thinking_blocks: tuple[ThinkingBlock, ...] = ()
 
     def __post_init__(self) -> None:
         if self.role not in ("user", "assistant", "tool"):
@@ -41,6 +56,10 @@ class ChatMessage:
             if self.tool_call_id is not None:
                 raise ValueError("assistant 消息不能包含 tool_call_id")
             return
+        if self.thinking_blocks:
+            raise ValueError(
+                "只有 assistant 工具调用消息可以包含 thinking_blocks"
+            )
         if not self.content.strip():
             raise ValueError("content 必须为非空字符串")
         if self.role == "tool":
