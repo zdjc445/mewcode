@@ -49,6 +49,55 @@ modules:
 
 模块 `id` 必须完整匹配 `[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*`，不会自动转换大小写或字符。`enabled: false` 只能精确禁用此前已经存在的可配置模块。`core` 和 `core.` 命名空间受保护，用户全局和项目配置都不能声明、覆盖或禁用其中的模块。配置文件不存在属于正常状态；文件存在但结构无效时应用拒绝启动。
 
+## 工具安全配置
+
+工具安全配置在应用启动时加载：
+
+1. 用户全局：`Path.home() / ".mewcode-agent" / "security.yaml"`
+2. 当前项目：`Path.cwd() / ".mewcode" / "security.yaml"`
+3. UI 生成的永久审批：`Path.home() / ".mewcode-agent" / "security-approvals.yaml"`
+
+用户全局配置可以设置 `mode`；项目配置只能声明 `version` 和 `rules`，不能降低用户选择的权限模式。以下是用户全局配置示例：
+
+```yaml
+version: 1
+mode: default
+rules:
+  - id: command.allow_tests
+    action: allow
+    tool: run_command
+    priority: 100
+    match:
+      command:
+        kind: glob
+        pattern: "uv run pytest*"
+
+  - id: write.confirm_config
+    action: ask
+    tool: write_file
+    priority: 200
+    match:
+      path:
+        kind: path_glob
+        pattern: "*.yaml"
+```
+
+每条规则必须精确包含 `id`、`action`、`tool`、`priority` 和 `match`。`action` 只能是 `allow`、`deny` 或 `ask`；matcher 的 `kind` 只能是 `exact`、`glob` 或 `path_glob`。同一规则中的 matcher 全部命中时规则才命中。`path_glob` 只匹配内置工具的 `path` 或 `cwd` 路径参数。
+
+规则分层顺序为：会话临时规则、项目规则、用户全局规则。相同层中先比较较大的 `priority`；相同优先级按 `deny`、`ask`、`allow` 排序，最后按规则 `id` 排序。内置危险命令拒绝和路径沙箱始终先于配置规则，不能被规则、计划批准或权限模式覆盖。
+
+权限模式只处理没有命中规则的调用：
+
+| mode | read | write | command |
+| --- | --- | --- | --- |
+| `strict` | 询问 | 询问 | 询问 |
+| `default` | 允许 | 询问 | 询问 |
+| `permissive` | 允许 | 允许 | 允许 |
+
+审批界面支持“仅允许这一次”“本会话允许”“永久允许”和“拒绝”。永久审批只保存工具调用安全指纹和项目根目录，不保存命令正文、文件内容或编辑内容；项目规则仍然高于永久审批。
+
+内置文件工具只能访问应用启动工作目录以内的规范化路径，并拒绝 `..`、绝对路径越界和符号链接越界。`run_command` 的 `cwd` 同样必须在工作目录内，并会拒绝已知破坏性命令和远程下载后直接执行的命令。`run_command` 仍然使用 PowerShell 或 `/bin/sh` 执行原始命令字符串，本项目当前没有提供操作系统级进程沙箱，因此危险命令检查不能等同于完整的文件系统、网络或进程隔离。
+
 ## 启动
 
 必须从项目根目录执行：
@@ -87,7 +136,7 @@ uv run python -m compileall -q src tests integration_tests
 - 每次用户请求最多执行 10 个工具；工具结果会立即写入对话历史并回灌模型，直到模型返回最终文本。
 - 模型在同一次响应中返回多个工具调用时，按响应索引顺序逐个执行。
 - 达到 10 次工具调用上限后，应用会关闭工具并要求模型根据已有结果生成最终总结。
-- 文件工具支持相对路径和绝对路径，不限制在项目目录内。
+- 文件工具支持项目内的相对路径和绝对路径；规范化结果超出启动工作目录时拒绝执行。
 - 工具失败以结构化结果写入历史，不会导致应用退出。
 - 不保存会话文件。
 - 不包含斜杠命令、MCP 或上下文压缩。
