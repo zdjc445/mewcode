@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -9,6 +10,12 @@ from mewcode_agent.agent import AgentLoop, ToolScheduler
 from mewcode_agent.app import ChatApp
 from mewcode_agent.config import ConfigError, load_config
 from mewcode_agent.history import ConversationHistory
+from mewcode_agent.mcp import (
+    McpConnectionManager,
+    McpDiagnostic,
+    McpError,
+    load_mcp_config,
+)
 from mewcode_agent.prompting import (
     GitRequestEnvironmentCollector,
     PromptComposer,
@@ -32,7 +39,20 @@ from mewcode_agent.tools.registry import create_core_registry
 CONFIG_FILENAME = "llm_providers.yaml"
 
 
-def main() -> int:
+def _print_mcp_diagnostic(diagnostic: McpDiagnostic) -> None:
+    print(
+        "MCP 警告："
+        f"server={diagnostic.server_id} "
+        f"code={diagnostic.code} "
+        f"{diagnostic.message}",
+        file=sys.stderr,
+    )
+
+
+async def run_application() -> int:
+    """Build and run one application session on the current event loop."""
+
+    mcp_manager: McpConnectionManager | None = None
     try:
         session_environment = collect_session_environment()
         working_directory = Path(
@@ -50,6 +70,7 @@ def main() -> int:
             working_directory / ".mewcode" / "prompts.yaml"
         )
         user_security_path = user_config_directory / "security.yaml"
+        mcp_config_path = user_config_directory / "mcp_servers.yaml"
         project_security_path = (
             working_directory / ".mewcode" / "security.yaml"
         )
@@ -82,6 +103,16 @@ def main() -> int:
         registry = create_core_registry(
             working_directory=working_directory,
         )
+        mcp_configuration = load_mcp_config(
+            working_directory=working_directory,
+            path=mcp_config_path,
+        )
+        mcp_manager = McpConnectionManager(
+            mcp_configuration,
+            registry,
+            diagnostic_handler=_print_mcp_diagnostic,
+        )
+        await mcp_manager.activate_all()
         security_boundary = registry.security_boundary
         assert security_boundary is not None
         security_policy = SecurityPolicyEngine(
@@ -100,22 +131,35 @@ def main() -> int:
         PromptEnvironmentError,
         PathSandboxError,
         ProviderError,
+        McpError,
     ) as exc:
+        if mcp_manager is not None:
+            await mcp_manager.close()
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
+    try:
+        agent_loop = AgentLoop(
+            provider,
+            registry,
+            prompt_runtime=prompt_runtime,
+            prompt_composer=prompt_composer,
+            scheduler=scheduler,
+        )
+        app = ChatApp(
+            agent_loop,
+            ConversationHistory(),
+            provider_id=provider_config.provider_id,
+            model=provider_config.model,
+        )
+        await app.run_async()
+        return 0
+    finally:
+        assert mcp_manager is not None
+        await mcp_manager.close()
 
-    agent_loop = AgentLoop(
-        provider,
-        registry,
-        prompt_runtime=prompt_runtime,
-        prompt_composer=prompt_composer,
-        scheduler=scheduler,
-    )
-    app = ChatApp(
-        agent_loop,
-        ConversationHistory(),
-        provider_id=provider_config.provider_id,
-        model=provider_config.model,
-    )
-    app.run()
-    return 0
+
+def main() -> int:
+    try:
+        return asyncio.run(run_application())
+    except KeyboardInterrupt:
+        return 130

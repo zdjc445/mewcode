@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
+import pytest
+
 from mewcode_agent import cli
+from mewcode_agent.mcp import McpConnectFailed, McpConfiguration
 from mewcode_agent.prompting.environment import PromptEnvironmentError
 from mewcode_agent.tools.registry import ToolRegistry
 
@@ -71,8 +75,11 @@ def test_cli_builds_and_runs_app_with_valid_config(
                 }
             )
 
+    async def run_app(_self: object) -> None:
+        run_calls.append(True)
+
     monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop, raising=False)
-    monkeypatch.setattr(cli.ChatApp, "run", lambda self: run_calls.append(True))
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
 
     assert cli.main() == 0
     assert run_calls == [True]
@@ -158,8 +165,11 @@ rules:
                 {"provider": provider, "registry": registry, **kwargs}
             )
 
+    async def run_app(_self: object) -> None:
+        return None
+
     monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
-    monkeypatch.setattr(cli.ChatApp, "run", lambda self: None)
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
 
     assert cli.main() == 0
     scheduler = calls[0]["scheduler"]
@@ -211,8 +221,11 @@ def test_cli_builds_prompt_dependencies_from_exact_two_layers(
                 {"provider": provider, "registry": registry, **kwargs}
             )
 
+    async def run_app(_self: object) -> None:
+        return None
+
     monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
-    monkeypatch.setattr(cli.ChatApp, "run", lambda self: None)
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
 
     assert cli.main() == 0
     assert len(calls) == 1
@@ -305,3 +318,186 @@ def test_cli_sanitizes_path_home_failure(monkeypatch, capsys) -> None:
     error = capsys.readouterr().err
     assert "启动失败：无法解析用户全局 Prompt 配置路径" in error
     assert "SECRET_HOME" not in error
+
+
+def test_cli_ignores_project_mcp_config_and_uses_one_event_loop(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    project_mcp = tmp_path / ".mewcode" / "mcp_servers.yaml"
+    project_mcp.parent.mkdir()
+    project_mcp.write_text("version: invalid\nservers: []\n", encoding="utf-8")
+    home_path = tmp_path / "home"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+    configurations: list[McpConfiguration] = []
+    loop_ids: list[int] = []
+    events: list[str] = []
+
+    class FakeManager:
+        def __init__(
+            self,
+            configuration: McpConfiguration,
+            registry: ToolRegistry,
+            **_kwargs: object,
+        ) -> None:
+            configurations.append(configuration)
+
+        async def activate_all(self) -> None:
+            loop_ids.append(id(asyncio.get_running_loop()))
+            events.append("activate")
+
+        async def close(self) -> None:
+            loop_ids.append(id(asyncio.get_running_loop()))
+            events.append("close")
+
+    async def run_app(_self: object) -> None:
+        loop_ids.append(id(asyncio.get_running_loop()))
+        events.append("app")
+
+    monkeypatch.setattr(cli, "McpConnectionManager", FakeManager)
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
+
+    assert cli.main() == 0
+    assert configurations[0].servers == ()
+    assert events == ["activate", "app", "close"]
+    assert len(set(loop_ids)) == 1
+
+
+def test_cli_loads_only_user_global_mcp_config(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    home_path = tmp_path / "home"
+    mcp_path = home_path / ".mewcode-agent" / "mcp_servers.yaml"
+    mcp_path.parent.mkdir(parents=True)
+    mcp_path.write_text(
+        """version: 1
+servers:
+  remote_one:
+    enabled: true
+    required: false
+    transport: streamable_http
+    url: https://example.test/mcp
+    header_env: {}
+    connect_timeout_seconds: 1
+    request_timeout_seconds: 2
+    shutdown_timeout_seconds: 1
+    tool_categories: {}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+    configurations: list[McpConfiguration] = []
+
+    class FakeManager:
+        def __init__(
+            self,
+            configuration: McpConfiguration,
+            registry: ToolRegistry,
+            **_kwargs: object,
+        ) -> None:
+            configurations.append(configuration)
+
+        async def activate_all(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def run_app(_self: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "McpConnectionManager", FakeManager)
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
+
+    assert cli.main() == 0
+    assert len(configurations[0].servers) == 1
+    assert configurations[0].servers[0].server_id == "remote_one"
+    assert configurations[0].servers[0].transport == "streamable_http"
+
+
+def test_cli_closes_manager_when_required_mcp_activation_fails(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+    capsys,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+    events: list[str] = []
+
+    class FailingManager:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def activate_all(self) -> None:
+            events.append("activate")
+            raise McpConnectFailed("required MCP server 激活失败")
+
+        async def close(self) -> None:
+            events.append("close")
+
+    async def should_not_run(_self: object) -> None:
+        events.append("app")
+
+    monkeypatch.setattr(cli, "McpConnectionManager", FailingManager)
+    monkeypatch.setattr(cli.ChatApp, "run_async", should_not_run)
+
+    assert cli.main() == 1
+    assert events == ["activate", "close"]
+    assert "required MCP server 激活失败" in capsys.readouterr().err
+
+
+def test_cli_closes_manager_when_textual_run_fails(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+    events: list[str] = []
+
+    class FakeManager:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def activate_all(self) -> None:
+            events.append("activate")
+
+        async def close(self) -> None:
+            events.append("close")
+
+    async def fail_app(_self: object) -> None:
+        events.append("app")
+        raise RuntimeError("textual failed")
+
+    monkeypatch.setattr(cli, "McpConnectionManager", FakeManager)
+    monkeypatch.setattr(cli.ChatApp, "run_async", fail_app)
+
+    with pytest.raises(RuntimeError, match="textual failed"):
+        cli.main()
+    assert events == ["activate", "app", "close"]
