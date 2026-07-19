@@ -17,6 +17,8 @@ class RunCommandTool(Tool):
     description = (
         "在系统命令解释器中执行命令并返回退出码、标准输出和标准错误。"
         "Windows 使用 PowerShell，其他系统使用 /bin/sh。"
+        "read_file、find_files 或 search_code 能完成文件读取、文件发现或代码搜索时，"
+        "必须使用对应专用工具，不要用本工具替代。"
     )
     parameters = {
         "type": "object",

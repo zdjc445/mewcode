@@ -17,6 +17,7 @@ class SearchCodeTool(Tool):
     description = (
         "使用 Python 正则表达式搜索 UTF-8 文本文件内容，返回文件、行号和匹配行。"
         "无法按 UTF-8 读取的文件会被跳过。"
+        "这是代码内容搜索的专用工具；不要使用 run_command 代替代码搜索。"
     )
     parameters = {
         "type": "object",

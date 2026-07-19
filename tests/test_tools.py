@@ -656,3 +656,32 @@ def test_core_tools_have_exact_categories(
 
     assert tool is not None
     assert tool.category == expected_category
+
+
+def test_core_tool_descriptions_repeat_critical_selection_rules() -> None:
+    registry = create_core_registry()
+    read_file = registry.get("read_file")
+    write_file = registry.get("write_file")
+    edit_file = registry.get("edit_file")
+    find_files = registry.get("find_files")
+    search_code = registry.get("search_code")
+    run_command = registry.get("run_command")
+
+    assert read_file is not None
+    assert write_file is not None
+    assert edit_file is not None
+    assert find_files is not None
+    assert search_code is not None
+    assert run_command is not None
+    assert "供 write_file 和 edit_file 做修改前校验" in (
+        read_file.description
+    )
+    assert "已有文件必须先通过 read_file 读取" in write_file.description
+    assert "文件必须先通过 read_file 读取" in edit_file.description
+    assert "文件发现的专用工具" in find_files.description
+    assert "代码内容搜索的专用工具" in search_code.description
+    command_description = run_command.description
+    assert "read_file" in command_description
+    assert "find_files" in command_description
+    assert "search_code" in command_description
+    assert "不要用本工具替代" in command_description

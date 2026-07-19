@@ -24,6 +24,31 @@ $env:DEEPSEEK_API_KEY = "你的 DeepSeek API Key"
 
 环境变量只对当前 PowerShell 进程及其子进程生效。
 
+## Prompt 配置
+
+Prompt 配置按以下顺序在应用启动时加载一次：
+
+1. 用户全局：`Path.home() / ".mewcode-agent" / "prompts.yaml"`
+2. 当前项目：`Path.cwd() / ".mewcode" / "prompts.yaml"`
+
+项目层对精确同名 `id` 的设置优先。修改配置后需要重启应用。
+
+```yaml
+version: 1
+modules:
+  - id: coding.project_rules
+    enabled: true
+    priority: 500
+    content: |-
+      修改代码前先读取相关文件。
+      完成修改后运行与改动直接相关的验证。
+
+  - id: output.default_style
+    enabled: false
+```
+
+模块 `id` 必须完整匹配 `[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*`，不会自动转换大小写或字符。`enabled: false` 只能精确禁用此前已经存在的可配置模块。`core` 和 `core.` 命名空间受保护，用户全局和项目配置都不能声明、覆盖或禁用其中的模块。配置文件不存在属于正常状态；文件存在但结构无效时应用拒绝启动。
+
 ## 启动
 
 必须从项目根目录执行：

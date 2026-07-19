@@ -16,6 +16,7 @@ class FindFilesTool(Tool):
     name = "find_files"
     description = (
         "按 glob 模式查找文件并返回绝对路径列表。支持 ** 递归模式，并包含隐藏文件。"
+        "这是文件发现的专用工具；不要使用 run_command 代替文件查找。"
     )
     parameters = {
         "type": "object",
