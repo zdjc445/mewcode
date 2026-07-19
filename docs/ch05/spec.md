@@ -488,13 +488,14 @@ client 必须拒绝：
 每个可注册工具必须满足：
 
 - `name` 是长度 `1–128` 的非空字符串，保持精确且区分大小写；
-- `inputSchema` 是有效 JSON Schema object；
+- `inputSchema` 是根 `type` 精确为 `object` 的有效 JSON Schema object；
 - 无 `$schema` 时按 JSON Schema 2020-12；
 - 显式 dialect 交给 JSON Schema validator 精确识别；不支持的 dialect 使该工具发现失败；
 - `description` 缺失时使用包含精确 server ID 和远端工具名的固定 fallback；
 - `execution.taskSupport` 为 `required` 时跳过该工具并输出稳定 warning，因为本章不支持 Tasks；
-- `optional` 或缺失时只使用普通 `tools/call`；
+- `forbidden`、`optional` 或缺失时只使用普通 `tools/call`；
 - `outputSchema` 存在时必须先验证 schema 本身，并在调用成功后验证 `structuredContent`。
+- `outputSchema` 的根 `type` 必须精确为 `object`。
 
 ### 11.3 稳定注册顺序
 

@@ -154,6 +154,10 @@ class StreamableHttpTransport(McpTransport):
         self._get_retry_seconds: float | None = None
         self._failure: McpError | None = None
         self._close_lock = asyncio.Lock()
+        self._long_stream_timeout = httpx.Timeout(
+            None,
+            connect=self._config.connect_timeout_seconds,
+        )
 
     @property
     def listener_supported(self) -> bool | None:
@@ -209,11 +213,17 @@ class StreamableHttpTransport(McpTransport):
             else None
         )
         try:
+            timeout = (
+                self._long_stream_timeout
+                if message.get("method") == "tools/call"
+                else self._config.request_timeout_seconds
+            )
             async with client.stream(
                 "POST",
                 self._config.url,
                 headers=headers,
                 content=payload,
+                timeout=timeout,
             ) as response:
                 self._validate_common_response(response, message)
                 if is_initialize:
@@ -252,11 +262,17 @@ class StreamableHttpTransport(McpTransport):
             raise ValueError("HTTP transport 收到不支持的 MCP 协议版本")
         self._initialized = True
 
-    def discard_session(self) -> None:
+    async def reset_session(self) -> None:
+        if self._listener_task is not None:
+            self._listener_task.cancel()
+            await asyncio.gather(self._listener_task, return_exceptions=True)
+            self._listener_task = None
+            self._listener_supported = None
         self._session_id = None
         self._initialized = False
         self._last_get_event_id = None
         self._get_retry_seconds = None
+        self._failure = None
 
     async def start_listener(self) -> None:
         if not self._initialized:
@@ -332,6 +348,7 @@ class StreamableHttpTransport(McpTransport):
                     "GET",
                     self._config.url,
                     headers=headers,
+                    timeout=self._long_stream_timeout,
                 ) as recovery:
                     if recovery.status_code == 404 and self._session_id is not None:
                         raise McpSessionExpired()
@@ -409,6 +426,7 @@ class StreamableHttpTransport(McpTransport):
                         "GET",
                         self._config.url,
                         headers=headers,
+                        timeout=self._long_stream_timeout,
                     ) as response:
                         if response.status_code == 405:
                             self._listener_supported = False

@@ -250,13 +250,15 @@ class JsonRpcSession:
         method: str,
         params: Mapping[str, Any] | list[Any] | None = None,
         *,
-        timeout_seconds: float,
+        timeout_seconds: float | None,
     ) -> Any:
         if self._closed_error is not None:
             raise self._closed_error
         if not isinstance(method, str) or not method:
             raise ValueError("request method 必须是非空字符串")
-        if type(timeout_seconds) not in (int, float) or timeout_seconds <= 0:
+        if timeout_seconds is not None and (
+            type(timeout_seconds) not in (int, float) or timeout_seconds <= 0
+        ):
             raise ValueError("timeout_seconds 必须是大于 0 的数字")
         request_id = self._next_request_id
         self._next_request_id += 1
@@ -271,6 +273,9 @@ class JsonRpcSession:
             _validate_params(params)
             message["params"] = params
         try:
+            if timeout_seconds is None:
+                await self._send_message(message)
+                return await asyncio.shield(future)
             async with asyncio.timeout(float(timeout_seconds)):
                 await self._send_message(message)
                 return await asyncio.shield(future)

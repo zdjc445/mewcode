@@ -34,6 +34,9 @@ class McpTransport(ABC):
     async def start_listener(self) -> None:
         """Start an optional server-initiated message listener."""
 
+    async def reset_session(self) -> None:
+        """Discard transport state tied to an expired logical session."""
+
     @abstractmethod
     async def close(self) -> None:
         """Release all transport resources."""
