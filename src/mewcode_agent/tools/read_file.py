@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from mewcode_agent.security.path_sandbox import PathSandbox
 from mewcode_agent.tools._paths import expand_path
 from mewcode_agent.tools.base import Tool, ToolExecutionError, validate_arguments
 from mewcode_agent.tools.file_state_cache import FileStateCache
@@ -19,7 +20,7 @@ class ReadFileTool(Tool):
     description = (
         "按行读取 UTF-8 文本文件，支持使用 offset 和 limit 分页。"
         "成功读取后记录文件状态，供 write_file 和 edit_file 做修改前校验。"
-        "path 可以是相对路径或绝对路径。"
+        "path 可以是相对路径或绝对路径，但规范化结果必须位于启动工作目录内。"
     )
     parameters = {
         "type": "object",
@@ -46,8 +47,13 @@ class ReadFileTool(Tool):
         "additionalProperties": False,
     }
 
-    def __init__(self, file_state_cache: FileStateCache) -> None:
+    def __init__(
+        self,
+        file_state_cache: FileStateCache,
+        path_sandbox: PathSandbox | None = None,
+    ) -> None:
         self._file_state_cache = file_state_cache
+        self._path_sandbox = path_sandbox
 
     async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         validate_arguments(
@@ -68,7 +74,11 @@ class ReadFileTool(Tool):
                 f"参数 limit 必须是 1 到 {MAX_READ_LINES} 之间的整数",
             )
 
-        path = expand_path(arguments["path"])
+        path = (
+            self._path_sandbox.resolve(arguments["path"])
+            if self._path_sandbox is not None
+            else expand_path(arguments["path"])
+        )
 
         def read() -> str:
             content = path.read_text(encoding="utf-8")

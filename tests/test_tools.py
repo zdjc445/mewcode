@@ -685,3 +685,48 @@ def test_core_tool_descriptions_repeat_critical_selection_rules() -> None:
     assert "find_files" in command_description
     assert "search_code" in command_description
     assert "不要用本工具替代" in command_description
+    for tool in (
+        read_file,
+        write_file,
+        edit_file,
+        find_files,
+        search_code,
+        run_command,
+    ):
+        assert "启动工作目录内" in tool.description
+    assert "已知危险命令" in run_command.description
+
+
+@pytest.mark.asyncio
+async def test_core_registry_rechecks_path_sandbox_before_file_access(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    registry = create_core_registry(working_directory=workspace)
+
+    result = await registry.execute(
+        "read_file",
+        json.dumps({"path": str(outside)}),
+    )
+
+    assert result.success is False
+    assert result.error_code == "security_denied"
+
+
+@pytest.mark.asyncio
+async def test_core_registry_rechecks_dangerous_command_boundary(
+    tmp_path: Path,
+) -> None:
+    registry = create_core_registry(working_directory=tmp_path)
+
+    result = await registry.execute(
+        "run_command",
+        json.dumps({"command": "git reset --hard HEAD"}),
+    )
+
+    assert result.success is False
+    assert result.error_code == "security_denied"
+    assert "destructive_git_operation" in (result.error_message or "")

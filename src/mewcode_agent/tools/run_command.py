@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from mewcode_agent.security.path_sandbox import PathSandbox
 from mewcode_agent.tools._paths import expand_path
 from mewcode_agent.tools.base import Tool, ToolExecutionError, validate_arguments
 
@@ -17,6 +18,7 @@ class RunCommandTool(Tool):
     description = (
         "在系统命令解释器中执行命令并返回退出码、标准输出和标准错误。"
         "Windows 使用 PowerShell，其他系统使用 /bin/sh。"
+        "cwd 规范化结果必须位于启动工作目录内；已知危险命令会在执行前被拒绝。"
         "read_file、find_files 或 search_code 能完成文件读取、文件发现或代码搜索时，"
         "必须使用对应专用工具，不要用本工具替代。"
     )
@@ -33,6 +35,9 @@ class RunCommandTool(Tool):
         "additionalProperties": False,
     }
 
+    def __init__(self, path_sandbox: PathSandbox | None = None) -> None:
+        self._path_sandbox = path_sandbox
+
     async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         validate_arguments(
             arguments,
@@ -45,7 +50,17 @@ class RunCommandTool(Tool):
                 "invalid_arguments",
                 "参数 command 不能为空",
             )
-        cwd = expand_path(arguments["cwd"]) if "cwd" in arguments else Path.cwd()
+        default_cwd = (
+            self._path_sandbox.working_directory
+            if self._path_sandbox is not None
+            else Path.cwd()
+        )
+        raw_cwd = arguments.get("cwd", str(default_cwd))
+        cwd = (
+            self._path_sandbox.resolve(raw_cwd)
+            if self._path_sandbox is not None
+            else expand_path(raw_cwd)
+        )
 
         if os.name == "nt":
             process = await asyncio.create_subprocess_exec(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from mewcode_agent.security.path_sandbox import PathSandbox
 from mewcode_agent.tools._paths import expand_path
 from mewcode_agent.tools.base import Tool, ToolExecutionError, validate_arguments
 from mewcode_agent.tools.diff import DiffResult, build_diff
@@ -18,6 +19,7 @@ class EditFileTool(Tool):
         "在 UTF-8 文本文件中按顺序进行多段原文替换。每项 old_text 必须在处理到该项时"
         "恰好出现一次；任意一项未匹配或多次匹配时，整个文件保持不变。"
         "文件必须先通过 read_file 读取且读取后未被修改。"
+        "path 规范化结果必须位于启动工作目录内。"
         "成功时返回统一 diff 和增删行数。"
     )
     parameters = {
@@ -52,15 +54,24 @@ class EditFileTool(Tool):
         "additionalProperties": False,
     }
 
-    def __init__(self, file_state_cache: FileStateCache) -> None:
+    def __init__(
+        self,
+        file_state_cache: FileStateCache,
+        path_sandbox: PathSandbox | None = None,
+    ) -> None:
         self._file_state_cache = file_state_cache
+        self._path_sandbox = path_sandbox
 
     async def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         validate_arguments(
             arguments,
             required={"path": str, "edits": list},
         )
-        path = expand_path(arguments["path"])
+        path = (
+            self._path_sandbox.resolve(arguments["path"])
+            if self._path_sandbox is not None
+            else expand_path(arguments["path"])
+        )
         edits = arguments["edits"]
         if not edits:
             raise ToolExecutionError(

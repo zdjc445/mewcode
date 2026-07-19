@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Literal
 
+from mewcode_agent.security.boundary import SecurityBoundary
+from mewcode_agent.security.models import SecurityRequest
+from mewcode_agent.security.path_sandbox import PathSandbox, PathSandboxError
 from mewcode_agent.tools.base import Tool, ToolExecutionError, ToolResult
 from mewcode_agent.tools.edit_file import EditFileTool
 from mewcode_agent.tools.file_state_cache import FileStateCache
@@ -21,8 +25,17 @@ ToolProtocol = Literal["openai", "anthropic"]
 class ToolRegistry:
     """Own all available tools and execute them by their exact names."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        security_boundary: SecurityBoundary | None = None,
+    ) -> None:
         self._tools: dict[str, Tool] = {}
+        self._security_boundary = security_boundary
+
+    @property
+    def security_boundary(self) -> SecurityBoundary | None:
+        return self._security_boundary
 
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
@@ -73,6 +86,24 @@ class ToolRegistry:
                     "invalid_arguments",
                     "工具参数必须是 JSON 对象",
                 )
+            if self._security_boundary is not None:
+                boundary_decision = self._security_boundary.evaluate(
+                    SecurityRequest(
+                        "registry-direct",
+                        name,
+                        tool.category,
+                        arguments,
+                        self._security_boundary.path_sandbox.working_directory,
+                    )
+                )
+                if boundary_decision is not None:
+                    raise ToolExecutionError(
+                        "security_denied",
+                        (
+                            "工具调用被安全边界拒绝: "
+                            f"{boundary_decision.reason_code}"
+                        ),
+                    )
             data = await asyncio.wait_for(
                 tool.execute(arguments),
                 timeout=tool.timeout_seconds,
@@ -121,6 +152,13 @@ class ToolRegistry:
                 error_code="invalid_encoding",
                 error_message="文件不是有效的 UTF-8 文本",
             )
+        except PathSandboxError:
+            return ToolResult(
+                tool_name=name,
+                success=False,
+                error_code="security_denied",
+                error_message="工具路径超出允许目录",
+            )
         except OSError as exc:
             return ToolResult(
                 tool_name=name,
@@ -137,16 +175,21 @@ class ToolRegistry:
             )
 
 
-def create_core_registry() -> ToolRegistry:
-    registry = ToolRegistry()
+def create_core_registry(
+    *,
+    working_directory: Path | None = None,
+) -> ToolRegistry:
+    path_sandbox = PathSandbox(working_directory or Path.cwd())
+    security_boundary = SecurityBoundary(path_sandbox)
+    registry = ToolRegistry(security_boundary=security_boundary)
     file_state_cache = FileStateCache()
     tools = (
-        ReadFileTool(file_state_cache),
-        WriteFileTool(file_state_cache),
-        EditFileTool(file_state_cache),
-        RunCommandTool(),
-        FindFilesTool(),
-        SearchCodeTool(),
+        ReadFileTool(file_state_cache, path_sandbox),
+        WriteFileTool(file_state_cache, path_sandbox),
+        EditFileTool(file_state_cache, path_sandbox),
+        RunCommandTool(path_sandbox),
+        FindFilesTool(path_sandbox),
+        SearchCodeTool(path_sandbox),
     )
     for tool in tools:
         registry.register(tool)
