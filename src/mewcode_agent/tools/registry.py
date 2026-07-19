@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -31,6 +32,7 @@ class ToolRegistry:
         security_boundary: SecurityBoundary | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {}
+        self._mcp_tools_by_server: dict[str, tuple[Tool, ...]] = {}
         self._security_boundary = security_boundary
 
     @property
@@ -38,9 +40,61 @@ class ToolRegistry:
         return self._security_boundary
 
     def register(self, tool: Tool) -> None:
+        if tool.name.startswith("mcp_"):
+            raise ValueError("mcp_ 工具名前缀由 MCP 子系统保留")
         if tool.name in self._tools:
             raise ValueError(f"工具已注册: {tool.name}")
         self._tools[tool.name] = tool
+
+    def replace_mcp_tools(
+        self,
+        server_id: str,
+        tools: Iterable[Tool],
+    ) -> None:
+        """Atomically replace one server's MCP tools and preserve all others."""
+
+        if not isinstance(server_id, str) or not server_id:
+            raise ValueError("MCP server_id 必须是非空字符串")
+        replacement = tuple(tools)
+        expected_prefix = f"mcp_{server_id}_"
+        replacement_names: set[str] = set()
+        for tool in replacement:
+            if not isinstance(tool, Tool):
+                raise TypeError("MCP 工具必须实现 Tool")
+            if not tool.name.startswith(expected_prefix):
+                raise ValueError("MCP 工具名与 server_id 不匹配")
+            if tool.name in replacement_names:
+                raise ValueError(f"MCP 工具别名冲突: {tool.name}")
+            replacement_names.add(tool.name)
+
+        old_mcp_names = {
+            tool.name
+            for group in self._mcp_tools_by_server.values()
+            for tool in group
+        }
+        base_tools = [
+            tool
+            for name, tool in self._tools.items()
+            if name not in old_mcp_names
+        ]
+        groups = dict(self._mcp_tools_by_server)
+        if replacement:
+            groups[server_id] = replacement
+        else:
+            groups.pop(server_id, None)
+
+        rebuilt: dict[str, Tool] = {}
+        for tool in base_tools:
+            if tool.name in rebuilt:
+                raise ValueError(f"工具已注册: {tool.name}")
+            rebuilt[tool.name] = tool
+        for grouped_server_id in sorted(groups):
+            for tool in groups[grouped_server_id]:
+                if tool.name in rebuilt:
+                    raise ValueError(f"MCP 工具别名冲突: {tool.name}")
+                rebuilt[tool.name] = tool
+        self._tools = rebuilt
+        self._mcp_tools_by_server = groups
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)

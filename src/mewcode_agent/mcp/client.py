@@ -23,6 +23,7 @@ from mewcode_agent.mcp.models import (
     McpServerConfig,
     McpServerInfo,
     McpServerSnapshot,
+    McpSessionExpired,
     McpToolCallResult,
     McpToolDefinition,
     McpToolNotFound,
@@ -199,14 +200,20 @@ class McpClient:
             not isinstance(key, str) for key in arguments
         ):
             raise ValueError("MCP tool arguments 必须是 JSON object")
-        result = await self._session.request(
-            "tools/call",
-            {
-                "name": remote_tool_name,
-                "arguments": dict(arguments),
-            },
-            timeout_seconds=None,
-        )
+        session = self._session
+        try:
+            result = await session.request(
+                "tools/call",
+                {
+                    "name": remote_tool_name,
+                    "arguments": dict(arguments),
+                },
+                timeout_seconds=None,
+            )
+        except McpSessionExpired:
+            if self._session is session:
+                self._connected = False
+            raise
         return self._parse_tool_result(result, definition)
 
     async def close(self) -> None:

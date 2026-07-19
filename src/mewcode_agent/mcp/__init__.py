@@ -5,6 +5,7 @@ from mewcode_agent.mcp.client import (
     MAX_MCP_TOOLS_PER_SERVER,
     McpClient,
 )
+from mewcode_agent.mcp.adapter import RemoteMcpTool, local_tool_name
 from mewcode_agent.mcp.config import (
     default_mcp_config_path,
     load_mcp_config,
@@ -12,6 +13,7 @@ from mewcode_agent.mcp.config import (
 from mewcode_agent.mcp.models import (
     MAX_MCP_ERROR_MESSAGE_BYTES,
     MAX_MCP_MESSAGE_BYTES,
+    MAX_MCP_RESULT_BYTES,
     MAX_MCP_STDERR_BYTES,
     MCP_PROTOCOL_VERSION,
     McpConnectFailed,
@@ -51,10 +53,12 @@ from mewcode_agent.mcp.protocol import (
     encode_json_rpc_message,
     parse_json_rpc_message,
 )
+from mewcode_agent.mcp.manager import McpConnectionManager, create_transport
 
 __all__ = [
     "MAX_MCP_ERROR_MESSAGE_BYTES",
     "MAX_MCP_MESSAGE_BYTES",
+    "MAX_MCP_RESULT_BYTES",
     "MAX_MCP_STDERR_BYTES",
     "MAX_MCP_TOOL_PAGES",
     "MAX_MCP_TOOLS_PER_SERVER",
@@ -69,6 +73,7 @@ __all__ = [
     "JsonRpcSuccessResponse",
     "McpConnectFailed",
     "McpClient",
+    "McpConnectionManager",
     "McpConnectionLost",
     "McpConfigError",
     "McpConfiguration",
@@ -89,11 +94,14 @@ __all__ = [
     "McpToolsCapabilityMissing",
     "StdioServerConfig",
     "StreamableHttpServerConfig",
+    "RemoteMcpTool",
     "UnsupportedMcpVersion",
     "default_mcp_config_path",
     "decode_json_rpc_message",
     "encode_json_rpc_message",
+    "create_transport",
     "load_mcp_config",
+    "local_tool_name",
     "parse_json_rpc_message",
     "thaw_json",
 ]

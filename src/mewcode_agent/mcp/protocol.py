@@ -384,6 +384,9 @@ class JsonRpcSession:
             self._ignored_response_ids.add(request_id)
         if not future.done():
             future.cancel()
+        elif not future.cancelled():
+            with suppress(BaseException):
+                future.exception()
 
     async def _send_cancellation(self, request_id: JsonRpcId) -> None:
         if self._closed_error is not None:

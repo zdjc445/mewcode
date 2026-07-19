@@ -250,12 +250,20 @@ class StreamableHttpTransport(McpTransport):
                     await self._consume_post_sse(response, request_id)
                     return
                 raise McpProtocolError("MCP HTTP response Content-Type 无效")
-        except McpError:
+        except McpError as exc:
+            if not isinstance(exc, McpSessionExpired) and not is_initialize:
+                self._fail(exc)
             raise
         except httpx.TimeoutException as exc:
-            raise self._request_failure(message, "请求超时") from exc
+            error = self._request_failure(message, "请求超时")
+            if not is_initialize:
+                self._fail(error)
+            raise error from exc
         except httpx.HTTPError as exc:
-            raise self._request_failure(message, "网络失败") from exc
+            error = self._request_failure(message, "网络失败")
+            if not is_initialize:
+                self._fail(error)
+            raise error from exc
 
     def mark_initialized(self, protocol_version: str) -> None:
         if protocol_version != MCP_PROTOCOL_VERSION:
