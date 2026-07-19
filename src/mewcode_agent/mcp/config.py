@@ -323,6 +323,12 @@ def _parse_headers(
             raise McpConfigError(
                 f"{location}.{header_name} 引用的环境变量不能包含换行"
             )
+        try:
+            header_value.encode("ascii")
+        except UnicodeError as exc:
+            raise McpConfigError(
+                f"{location}.{header_name} 引用的环境变量必须可编码为 ASCII"
+            ) from exc
         headers[header_name] = header_value
     return headers
 

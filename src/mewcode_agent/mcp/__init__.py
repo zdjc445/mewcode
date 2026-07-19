@@ -7,7 +7,9 @@ from mewcode_agent.mcp.config import (
 from mewcode_agent.mcp.models import (
     MAX_MCP_ERROR_MESSAGE_BYTES,
     MAX_MCP_MESSAGE_BYTES,
+    MAX_MCP_STDERR_BYTES,
     MCP_PROTOCOL_VERSION,
+    McpConnectFailed,
     McpConnectionLost,
     McpConfigError,
     McpConfiguration,
@@ -16,6 +18,8 @@ from mewcode_agent.mcp.models import (
     McpProtocolError,
     McpRequestTimeout,
     McpServerConfig,
+    McpSessionExpired,
+    McpShutdownFailed,
     StdioServerConfig,
     StreamableHttpServerConfig,
 )
@@ -36,6 +40,7 @@ from mewcode_agent.mcp.protocol import (
 __all__ = [
     "MAX_MCP_ERROR_MESSAGE_BYTES",
     "MAX_MCP_MESSAGE_BYTES",
+    "MAX_MCP_STDERR_BYTES",
     "MCP_PROTOCOL_VERSION",
     "JsonRpcErrorObject",
     "JsonRpcErrorResponse",
@@ -45,6 +50,7 @@ __all__ = [
     "JsonRpcRequest",
     "JsonRpcSession",
     "JsonRpcSuccessResponse",
+    "McpConnectFailed",
     "McpConnectionLost",
     "McpConfigError",
     "McpConfiguration",
@@ -53,6 +59,8 @@ __all__ = [
     "McpProtocolError",
     "McpRequestTimeout",
     "McpServerConfig",
+    "McpSessionExpired",
+    "McpShutdownFailed",
     "StdioServerConfig",
     "StreamableHttpServerConfig",
     "default_mcp_config_path",

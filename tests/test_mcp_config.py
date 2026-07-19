@@ -332,3 +332,18 @@ def test_unknown_enabled_server_field_is_rejected(tmp_path: Path) -> None:
             path=path,
             environ={"PARENT_PATH": "safe"},
         )
+
+
+@pytest.mark.parametrize("header_value", ["line one\nline two", "非 ASCII"])
+def test_http_header_environment_must_be_safe_for_httpx(
+    tmp_path: Path,
+    header_value: str,
+) -> None:
+    path = _write(tmp_path / "mcp.yaml", _http_config())
+
+    with pytest.raises(McpConfigError, match="header_env.Authorization"):
+        load_mcp_config(
+            working_directory=tmp_path,
+            path=path,
+            environ={"MCP_AUTH": header_value},
+        )

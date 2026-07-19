@@ -262,6 +262,26 @@ async def test_initialize_timeout_does_not_send_cancellation() -> None:
     assert len(sink.messages) == 1
 
 
+async def test_request_timeout_includes_transport_send_time() -> None:
+    messages: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        messages.append(message)
+        if message.get("method") != "notifications/cancelled":
+            await asyncio.Event().wait()
+
+    session = JsonRpcSession(send)
+
+    with pytest.raises(McpRequestTimeout):
+        await session.request("tools/list", {}, timeout_seconds=0.001)
+
+    assert messages[-1] == {
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": 1},
+    }
+
+
 async def test_outer_cancellation_sends_protocol_cancellation() -> None:
     sink = MessageSink()
     session = JsonRpcSession(sink)

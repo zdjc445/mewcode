@@ -13,6 +13,7 @@ from mewcode_agent.tools.base import ToolCategory
 MCP_PROTOCOL_VERSION = "2025-11-25"
 MAX_MCP_MESSAGE_BYTES = 8 * 1024 * 1024
 MAX_MCP_ERROR_MESSAGE_BYTES = 2 * 1024
+MAX_MCP_STDERR_BYTES = 256 * 1024
 
 McpTransportName: TypeAlias = Literal["stdio", "streamable_http"]
 
@@ -59,6 +60,27 @@ class McpMessageTooLarge(McpError):
 
     def __init__(self) -> None:
         super().__init__("mcp_message_too_large", "MCP 消息超过 8 MiB 上限")
+
+
+class McpConnectFailed(McpError):
+    """An MCP transport could not be established."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("mcp_connect_failed", message)
+
+
+class McpShutdownFailed(McpError):
+    """An MCP transport required forced or incomplete shutdown."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("mcp_shutdown_failed", message)
+
+
+class McpSessionExpired(McpError):
+    """A Streamable HTTP server explicitly rejected an old session."""
+
+    def __init__(self, message: str = "MCP HTTP session 已失效") -> None:
+        super().__init__("mcp_session_expired", message)
 
 
 def _freeze_mapping(value: Mapping[str, str]) -> Mapping[str, str]:

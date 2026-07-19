@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 import json
 from typing import Any, TypeAlias, cast
@@ -224,6 +225,7 @@ class JsonRpcSession:
         self._completed_response_ids: set[JsonRpcId] = set()
         self._ignored_response_ids: set[JsonRpcId] = set()
         self._notification_handlers: dict[str, NotificationHandler] = {}
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._closed_error: McpError | None = None
 
     @property
@@ -269,16 +271,9 @@ class JsonRpcSession:
             _validate_params(params)
             message["params"] = params
         try:
-            await self._send_message(message)
-        except BaseException:
-            self._abandon(request_id, future)
-            raise
-
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(future),
-                timeout=float(timeout_seconds),
-            )
+            async with asyncio.timeout(float(timeout_seconds)):
+                await self._send_message(message)
+                return await asyncio.shield(future)
         except TimeoutError as exc:
             self._abandon(request_id, future)
             if method != "initialize":
@@ -288,6 +283,9 @@ class JsonRpcSession:
             self._abandon(request_id, future)
             if method != "initialize":
                 await self._send_cancellation(request_id)
+            raise
+        except BaseException:
+            self._abandon(request_id, future)
             raise
 
     async def notify(
@@ -329,6 +327,8 @@ class JsonRpcSession:
             if not future.done():
                 future.set_exception(self._closed_error)
         self._pending.clear()
+        for task in self._background_tasks:
+            task.cancel()
 
     def _receive_response(
         self,
@@ -383,13 +383,21 @@ class JsonRpcSession:
     async def _send_cancellation(self, request_id: JsonRpcId) -> None:
         if self._closed_error is not None:
             return
-        try:
-            await self._send_message(
+        task = asyncio.create_task(
+            self._send_message(
                 {
                     "jsonrpc": "2.0",
                     "method": "notifications/cancelled",
                     "params": {"requestId": request_id},
                 }
-            )
-        except Exception:
-            return
+            ),
+            name=f"mcp-jsonrpc-cancel-{request_id}",
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._finish_background_task)
+        await asyncio.sleep(0)
+
+    def _finish_background_task(self, task: asyncio.Task[None]) -> None:
+        self._background_tasks.discard(task)
+        with suppress(BaseException):
+            task.result()
