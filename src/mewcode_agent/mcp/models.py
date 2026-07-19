@@ -19,13 +19,23 @@ MAX_MCP_RESULT_BYTES = 4 * 1024 * 1024
 McpTransportName: TypeAlias = Literal["stdio", "streamable_http"]
 
 
+def _bounded_error_message(message: str) -> str:
+    encoded = message.encode("utf-8", errors="replace")
+    if len(encoded) <= MAX_MCP_ERROR_MESSAGE_BYTES:
+        return message
+    marker = "…"
+    budget = MAX_MCP_ERROR_MESSAGE_BYTES - len(marker.encode("utf-8"))
+    return encoded[:budget].decode("utf-8", errors="ignore") + marker
+
+
 class McpError(RuntimeError):
     """An MCP failure with a stable code and safe user-facing message."""
 
     def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
+        safe_message = _bounded_error_message(message)
+        super().__init__(safe_message)
         self.code = code
-        self.message = message
+        self.message = safe_message
 
 
 class McpConfigError(McpError):

@@ -145,7 +145,11 @@ class McpClient:
             self._handle_transport_close,
         )
         try:
-            return await self._initialize_session()
+            try:
+                return await self._initialize_session()
+            except McpSessionExpired:
+                await self._reset_logical_session()
+                return await self._initialize_session()
         except BaseException:
             self._session.close(McpConnectionLost("MCP 初始化失败"))
             with suppress(BaseException):
@@ -156,35 +160,45 @@ class McpClient:
     async def reinitialize(self) -> McpServerSnapshot:
         if self._closed:
             raise McpConnectionLost("MCP client 已关闭")
-        if self._refresh_task is not None:
+        if (
+            self._refresh_task is not None
+            and self._refresh_task is not asyncio.current_task()
+        ):
             self._refresh_task.cancel()
             await asyncio.gather(self._refresh_task, return_exceptions=True)
             self._refresh_task = None
-        self._session.close(McpConnectionLost("MCP session 已重置"))
-        await self._transport.reset_session()
-        self._session = self._new_session()
-        self._initialized = False
-        self._connected = False
+        await self._reset_logical_session()
         return await self._initialize_session()
 
     async def discover_tools(self) -> tuple[McpToolDefinition, ...]:
         if not self._initialized:
             raise McpConnectionLost("MCP client 尚未初始化")
-        async with self._discovery_lock:
-            tools, diagnostics, discovered_names = await self._read_all_tool_pages()
-            missing_categories = sorted(
-                set(self._config.tool_categories) - discovered_names
-            )
-            if missing_categories:
-                names = ", ".join(repr(name) for name in missing_categories)
-                raise McpProtocolError(
-                    f"MCP tool_categories 包含未发现的远端工具: {names}"
+        session = self._session
+        try:
+            async with self._discovery_lock:
+                tools, diagnostics, discovered_names = (
+                    await self._read_all_tool_pages()
                 )
-            ordered = tuple(sorted(tools, key=lambda item: item.name))
-            self._tools = ordered
-            self._tools_by_name = {tool.name: tool for tool in ordered}
-            self._diagnostics = tuple(diagnostics)
-            return ordered
+                missing_categories = sorted(
+                    set(self._config.tool_categories) - discovered_names
+                )
+                if missing_categories:
+                    names = ", ".join(
+                        repr(name) for name in missing_categories
+                    )
+                    raise McpProtocolError(
+                        "MCP tool_categories 包含未发现的远端工具: "
+                        f"{names}"
+                    )
+                ordered = tuple(sorted(tools, key=lambda item: item.name))
+                self._tools = ordered
+                self._tools_by_name = {tool.name: tool for tool in ordered}
+                self._diagnostics = tuple(diagnostics)
+                return ordered
+        except McpSessionExpired:
+            if self._session is session:
+                self._connected = False
+            raise
 
     async def call_tool(
         self,
@@ -248,6 +262,13 @@ class McpClient:
             self._on_tools_list_changed,
         )
         return session
+
+    async def _reset_logical_session(self) -> None:
+        self._session.close(McpConnectionLost("MCP session 已重置"))
+        await self._transport.reset_session()
+        self._session = self._new_session()
+        self._initialized = False
+        self._connected = False
 
     async def _initialize_session(self) -> McpServerSnapshot:
         try:

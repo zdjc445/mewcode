@@ -39,7 +39,9 @@ class _RequiredActivationFailure(Exception):
 def create_transport(config: McpServerConfig) -> McpTransport:
     if config.transport == "stdio":
         return StdioTransport(config)
-    return StreamableHttpTransport(config)
+    if config.transport == "streamable_http":
+        return StreamableHttpTransport(config)
+    raise ValueError("不支持的 MCP transport")
 
 
 class McpConnectionManager:
@@ -233,15 +235,18 @@ class McpConnectionManager:
             self._replace_server_tools(client)
             for diagnostic in client.diagnostics:
                 self._record_diagnostic(diagnostic)
-        except Exception as exc:
-            code = exc.code if isinstance(exc, McpError) else "mcp_protocol_error"
-            self._record_diagnostic(
-                McpDiagnostic(
-                    server_id=server_id,
-                    code=code,
-                    message="MCP 工具列表刷新失败，保留旧快照",
+        except McpSessionExpired:
+            try:
+                refreshed = await self._reinitialize_expired_session(
+                    server_id,
+                    client,
                 )
-            )
+                for diagnostic in refreshed.diagnostics:
+                    self._record_diagnostic(diagnostic)
+            except Exception as exc:
+                self._record_refresh_failure(server_id, exc)
+        except Exception as exc:
+            self._record_refresh_failure(server_id, exc)
 
     async def _reconnect_server(
         self,
@@ -303,3 +308,17 @@ class McpConnectionManager:
         self._diagnostics.append(diagnostic)
         if self._diagnostic_handler is not None:
             self._diagnostic_handler(diagnostic)
+
+    def _record_refresh_failure(
+        self,
+        server_id: str,
+        error: Exception,
+    ) -> None:
+        code = error.code if isinstance(error, McpError) else "mcp_protocol_error"
+        self._record_diagnostic(
+            McpDiagnostic(
+                server_id=server_id,
+                code=code,
+                message="MCP 工具列表刷新失败，保留旧快照",
+            )
+        )

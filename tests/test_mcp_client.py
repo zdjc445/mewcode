@@ -13,6 +13,7 @@ from mewcode_agent.mcp import (
     McpClient,
     McpInvalidToolResult,
     McpProtocolError,
+    McpSessionExpired,
     McpToolNotFound,
     McpToolsCapabilityMissing,
     StreamableHttpServerConfig,
@@ -79,6 +80,7 @@ class FakeTransport(McpTransport):
         self.call_result: dict[str, Any] = {
             "content": [{"type": "text", "text": "ok"}]
         }
+        self.expire_list_calls = 0
         self.messages: list[dict[str, Any]] = []
         self.marked_version: str | None = None
         self.listener_started = False
@@ -105,6 +107,9 @@ class FakeTransport(McpTransport):
         if method == "initialize":
             result = self.initialize_result
         elif method == "tools/list":
+            if self.expire_list_calls:
+                self.expire_list_calls -= 1
+                raise McpSessionExpired()
             params = message.get("params", {})
             cursor = params.get("cursor")
             result = (
@@ -524,6 +529,24 @@ async def test_reinitialize_creates_new_json_rpc_id_sequence() -> None:
         for message in transport.messages
         if message.get("method") == "initialize"
     ]
+    assert initialize_ids == [1, 1]
+    assert transport.reset_count == 1
+    await client.close()
+
+
+async def test_initial_tools_list_session_404_reinitializes_once() -> None:
+    transport = FakeTransport()
+    transport.expire_list_calls = 1
+    client = McpClient(_config(), transport)
+
+    snapshot = await client.connect()
+
+    initialize_ids = [
+        message["id"]
+        for message in transport.messages
+        if message.get("method") == "initialize"
+    ]
+    assert [tool.name for tool in snapshot.tools] == ["echo"]
     assert initialize_ids == [1, 1]
     assert transport.reset_count == 1
     await client.close()

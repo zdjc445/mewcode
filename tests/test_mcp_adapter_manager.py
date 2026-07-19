@@ -281,6 +281,7 @@ class ManagedTransport(McpTransport):
         self.initialize_count = 0
         self.call_count = 0
         self.reset_count = 0
+        self.expire_list_calls = 0
         self.closed = False
         self._on_message: InboundMessageHandler | None = None
         self._on_close: CloseHandler | None = None
@@ -315,6 +316,9 @@ class ManagedTransport(McpTransport):
                 "serverInfo": {"name": self.server_id, "version": "1"},
             }
         elif method == "tools/list":
+            if self.expire_list_calls:
+                self.expire_list_calls -= 1
+                raise McpSessionExpired()
             result = {"tools": self.tools}
         elif method == "tools/call":
             self.call_count += 1
@@ -625,4 +629,30 @@ async def test_failed_list_changed_refresh_keeps_old_snapshot() -> None:
     assert manager.diagnostics[-1].message == (
         "MCP 工具列表刷新失败，保留旧快照"
     )
+    await manager.close()
+
+
+async def test_list_changed_session_404_reinitializes_and_updates_snapshot() -> None:
+    transport = ManagedTransport(
+        "refresh_session",
+        tools=[_managed_tool("old")],
+        list_changed=True,
+    )
+    registry = ToolRegistry()
+    manager = McpConnectionManager(
+        McpConfiguration((_config("refresh_session"),)),
+        registry,
+        transport_factory=SequenceFactory({"refresh_session": [transport]}),
+    )
+    await manager.activate_all()
+    transport.tools = [_managed_tool("new")]
+    transport.expire_list_calls = 1
+    new_alias = local_tool_name("refresh_session", "new")
+
+    await transport.emit_list_changed()
+    await _wait_until(lambda: registry.get(new_alias) is not None)
+
+    assert transport.reset_count == 1
+    assert transport.initialize_count == 2
+    assert registry.get(local_tool_name("refresh_session", "old")) is None
     await manager.close()

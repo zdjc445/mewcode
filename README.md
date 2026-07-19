@@ -98,6 +98,53 @@ rules:
 
 内置文件工具只能访问应用启动工作目录以内的规范化路径，并拒绝 `..`、绝对路径越界和符号链接越界。`run_command` 的 `cwd` 同样必须在工作目录内，并会拒绝已知破坏性命令和远程下载后直接执行的命令。`run_command` 仍然使用 PowerShell 或 `/bin/sh` 执行原始命令字符串，本项目当前没有提供操作系统级进程沙箱，因此危险命令检查不能等同于完整的文件系统、网络或进程隔离。
 
+## MCP 工具配置
+
+应用支持 MCP `2025-11-25` 的 Tools 能力，以及本地子进程 `stdio` 和远程 `streamable_http` 两种传输。MCP 配置只从用户全局路径加载：
+
+```text
+Path.home() / ".mewcode-agent" / "mcp_servers.yaml"
+```
+
+项目中的 `.mewcode/mcp_servers.yaml` 不会被读取，避免打开项目时自动启动进程或发起网络请求。配置文件不存在表示不启用外部 MCP server。
+
+```yaml
+version: 1
+servers:
+  local_example:
+    enabled: true
+    required: true
+    transport: stdio
+    command: python
+    args: ["-m", "example_mcp_server"]
+    cwd: "."
+    env:
+      PATH: PATH
+      SYSTEMROOT: SYSTEMROOT
+      EXAMPLE_TOKEN: EXAMPLE_MCP_TOKEN
+    connect_timeout_seconds: 10
+    request_timeout_seconds: 30
+    shutdown_timeout_seconds: 5
+    tool_categories:
+      get_status: read
+
+  remote_example:
+    enabled: true
+    required: false
+    transport: streamable_http
+    url: "https://example.com/mcp"
+    header_env:
+      Authorization: EXAMPLE_MCP_AUTHORIZATION
+    connect_timeout_seconds: 10
+    request_timeout_seconds: 60
+    shutdown_timeout_seconds: 5
+    tool_categories: {}
+```
+
+`env` 的键是子进程环境变量名，值是父进程环境变量名；子进程不会隐式继承其他环境变量。`header_env` 同样只引用父进程环境变量，环境变量值需要自行包含完整的 `Bearer ` 等前缀。非 loopback HTTP server 必须使用 HTTPS；明文 HTTP 只允许 `localhost`、`127.0.0.1` 或 `::1`。
+
+`required: true` 的 server 激活失败会阻止应用启动；optional server 失败时会输出不含 secret 的警告并跳过。远端工具默认安全类别为 `command`，因此在 `default` 安全模式下需要审批；只有在 `tool_categories` 中用精确、区分大小写的远端工具名声明后，才会改为 `read` 或 `write`。MCP annotations 不会改变安全分类。
+
 ## 启动
 
 必须从项目根目录执行：
@@ -133,10 +180,11 @@ uv run python -m compileall -q src tests integration_tests
 - 支持流式响应。
 - 支持当前进程内的多轮对话。
 - 内置 `read_file`、`write_file`、`edit_file`、`run_command`、`find_files` 和 `search_code` 六个工具。
+- 支持通过 stdio 或 Streamable HTTP 发现并复用 MCP 远端工具；当前只实现 MCP Tools，不实现 Resources、Prompts、OAuth 或 Tasks。
 - 每次用户请求最多执行 10 个工具；工具结果会立即写入对话历史并回灌模型，直到模型返回最终文本。
 - 模型在同一次响应中返回多个工具调用时，按响应索引顺序逐个执行。
 - 达到 10 次工具调用上限后，应用会关闭工具并要求模型根据已有结果生成最终总结。
 - 文件工具支持项目内的相对路径和绝对路径；规范化结果超出启动工作目录时拒绝执行。
 - 工具失败以结构化结果写入历史，不会导致应用退出。
 - 不保存会话文件。
-- 不包含斜杠命令、MCP 或上下文压缩。
+- 不包含斜杠命令或上下文压缩。

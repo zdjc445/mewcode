@@ -2,7 +2,7 @@
 
 ## 1. 文档状态
 
-- 状态：规格草案，等待用户审核；尚未开始实现。
+- 状态：已实现，并通过 Chapter 05 自动化验收。
 - 前置实现：Chapter 02 ReAct 工具循环、Chapter 03 模块化 Prompt、Chapter 04 工具安全策略与审批。
 - 本章目标：实现一个基于 MCP `2025-11-25` 的工具客户端，通过 stdio 或 Streamable HTTP 连接外部 MCP server，发现其工具并包装成现有 `Tool`，使 Agent 可以通过现有注册、调度、安全审批和历史回填链路调用远端工具。
 
@@ -14,13 +14,13 @@
 - [MCP 2025-11-25 传输规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 - [MCP 2025-11-25 工具规范](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
 
-## 2. 本草案采用的技术决策
+## 2. 本实现采用的技术决策
 
 | 项目 | 决策 |
 | --- | --- |
 | MCP 协议版本 | 只支持当前稳定版 `2025-11-25` |
 | 旧版本兼容 | 不支持 `2024-*`、`2025-03-26`、`2025-06-18`，不回退到旧 HTTP+SSE |
-| 草案版本 | 不支持 `2026-07-28-RC` 或 `draft` |
+| 非稳定协议版本 | 不支持 `2026-07-28-RC` 或 `draft` |
 | MCP 功能范围 | 只消费 server 的 Tools 能力 |
 | 标准传输 | stdio 与 Streamable HTTP |
 | 协议实现 | 在项目内实现受限的 JSON-RPC/MCP 客户端，不依赖 MCP SDK 隐式管理生命周期 |
@@ -199,6 +199,7 @@ tool_categories
 - 不自动跟随 HTTP redirect；
 - `header_env` 是“HTTP header 名 → 父进程环境变量名”的字符串映射；
 - 环境变量的完整值作为 header value，例如 `Authorization` 对应的环境变量需要自行包含 `Bearer ` 前缀；
+- header 环境变量值必须能按 HTTP client 的精确要求编码为 ASCII，且不得包含 CR 或 LF；
 - 配置不得覆盖 `Accept`、`Content-Type`、`MCP-Protocol-Version`、`MCP-Session-Id`、`Last-Event-ID` 或 `Origin`；比较按 HTTP header 的大小写不敏感语义执行；
 - header 值、session ID、URL userinfo 和环境变量值不得进入日志、异常正文、`repr` 或模型历史。
 
@@ -491,6 +492,7 @@ client 必须拒绝：
 - `inputSchema` 是根 `type` 精确为 `object` 的有效 JSON Schema object；
 - 无 `$schema` 时按 JSON Schema 2020-12；
 - 显式 dialect 交给 JSON Schema validator 精确识别；不支持的 dialect 使该工具发现失败；
+- 本地结果校验不自动获取远程 `$ref`，无法从当前 schema 本地解析的引用使结果校验失败；
 - `description` 缺失时使用包含精确 server ID 和远端工具名的固定 fallback；
 - `execution.taskSupport` 为 `required` 时跳过该工具并输出稳定 warning，因为本章不支持 Tasks；
 - `forbidden`、`optional` 或缺失时只使用普通 `tools/call`；
@@ -774,9 +776,9 @@ error_message = 包含整数 code 与长度受限的 message
 14. 所有 buffer、分页、工具数量、结果和错误消息都有固定上限。
 15. 默认测试不访问公网、不要求真实 MCP server，且 Chapter 01–04 全部回归通过。
 
-## 20. 实现前审核点
+## 20. 已确认的实现决策
 
-开始 plan 和编码前，需要用户审核以下本章选择：
+本章按以下已确认选择完成实现：
 
 1. 只支持稳定版 `2025-11-25`，不兼容旧协议和 RC；
 2. 只实现 Tools，其他 MCP 能力全部不声明；
