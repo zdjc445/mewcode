@@ -1,6 +1,10 @@
 """Public prompt subsystem API."""
 
 from mewcode_agent.prompting.builtins import BUILTIN_MODULES
+from mewcode_agent.prompting.composer import (
+    PromptComposer,
+    render_control_message,
+)
 from mewcode_agent.prompting.environment import (
     GitEnvironment,
     GitRequestEnvironmentCollector,
@@ -21,21 +25,25 @@ from mewcode_agent.prompting.models import (
     PromptModule,
     RuntimeInstruction,
 )
+from mewcode_agent.prompting.runtime import PromptRuntime
 
 __all__ = [
     "BUILTIN_MODULES",
     "ControlMessage",
     "GitEnvironment",
     "GitRequestEnvironmentCollector",
+    "PromptComposer",
     "PromptConfigError",
     "PromptEnvironmentError",
     "PromptFrame",
     "PromptItem",
     "PromptModule",
+    "PromptRuntime",
     "RequestEnvironment",
     "RequestEnvironmentCollector",
     "RuntimeInstruction",
     "SessionEnvironment",
     "collect_session_environment",
     "load_prompt_modules",
+    "render_control_message",
 ]
