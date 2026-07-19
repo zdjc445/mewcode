@@ -11,6 +11,8 @@ from typing import Literal, TypeAlias
 from mewcode_agent.tools.base import ToolCategory
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
+MAX_MCP_MESSAGE_BYTES = 8 * 1024 * 1024
+MAX_MCP_ERROR_MESSAGE_BYTES = 2 * 1024
 
 McpTransportName: TypeAlias = Literal["stdio", "streamable_http"]
 
@@ -29,6 +31,34 @@ class McpConfigError(McpError):
 
     def __init__(self, message: str) -> None:
         super().__init__("mcp_config_error", message)
+
+
+class McpProtocolError(McpError):
+    """A JSON-RPC or MCP protocol violation."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("mcp_protocol_error", message)
+
+
+class McpRequestTimeout(McpError):
+    """A lifecycle request exceeded its configured timeout."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("mcp_request_timeout", message)
+
+
+class McpConnectionLost(McpError):
+    """The transport closed while requests were pending."""
+
+    def __init__(self, message: str = "MCP 连接已关闭") -> None:
+        super().__init__("mcp_connection_lost", message)
+
+
+class McpMessageTooLarge(McpError):
+    """An inbound or outbound protocol message exceeded the fixed limit."""
+
+    def __init__(self) -> None:
+        super().__init__("mcp_message_too_large", "MCP 消息超过 8 MiB 上限")
 
 
 def _freeze_mapping(value: Mapping[str, str]) -> Mapping[str, str]:
