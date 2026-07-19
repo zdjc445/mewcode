@@ -8,14 +8,19 @@ import pytest
 
 from mewcode_agent.config import ProviderConfig
 from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
+from mewcode_agent.prompting.models import ControlMessage
 from mewcode_agent.providers.base import (
     ProviderError,
+    ProviderRequest,
     ProviderStreamEvent,
     ProviderTextDelta,
     ProviderThinkingComplete,
     ProviderThinkingDelta,
     ProviderToolCall,
     ProviderTurnEnd,
+    ProviderUsage,
+    ProviderUsageEvent,
+    ProviderUsageResult,
 )
 from mewcode_agent.providers.openai_provider import OpenAIProvider
 
@@ -55,6 +60,7 @@ def make_chunk(
     reasoning_content: str | None = None,
     finish_reason: str | None = None,
     with_choices: bool = True,
+    usage: Any | None = None,
 ) -> Any:
     choices: list[Any] = []
     if with_choices:
@@ -66,7 +72,7 @@ def make_chunk(
         choices.append(
             SimpleNamespace(delta=delta, finish_reason=finish_reason)
         )
-    return SimpleNamespace(choices=choices)
+    return SimpleNamespace(choices=choices, usage=usage)
 
 
 def make_tool_chunk(
@@ -104,10 +110,29 @@ async def collect(provider: OpenAIProvider) -> list[ProviderStreamEvent]:
     return [
         event
         async for event in provider.stream_chat(
-            [ChatMessage(role="user", content="你好")],
-            system_prompt="system text",
+            request_for(ChatMessage(role="user", content="你好"))
         )
     ]
+
+
+def request_for(*items: ChatMessage | ControlMessage) -> ProviderRequest:
+    return ProviderRequest("system text", tuple(items), None)
+
+
+OPENAI_USAGE_MISSING_EVENT = ProviderUsageEvent(
+    ProviderUsageResult("unavailable", None, "openai_usage_missing")
+)
+
+
+def openai_usage(**overrides: object) -> Any:
+    fields: dict[str, object] = {
+        "prompt_tokens": 150,
+        "prompt_cache_hit_tokens": 120,
+        "prompt_cache_miss_tokens": 30,
+        "completion_tokens": 9,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
 
 
 @pytest.mark.asyncio
@@ -135,6 +160,7 @@ async def test_openai_provider_streams_text_and_request_shape(
     assert events == [
         ProviderTextDelta("你"),
         ProviderTextDelta("好"),
+        OPENAI_USAGE_MISSING_EVENT,
         ProviderTurnEnd("end_turn"),
     ]
     assert create.kwargs == {
@@ -145,6 +171,7 @@ async def test_openai_provider_streams_text_and_request_shape(
         ],
         "max_tokens": 4096,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
 
 
@@ -172,6 +199,7 @@ async def test_openai_provider_maps_thinking_text_and_stop_reason(
         ProviderThinkingDelta("先分析"),
         ProviderTextDelta("答案"),
         ProviderThinkingComplete(ThinkingBlock("先分析")),
+        OPENAI_USAGE_MISSING_EVENT,
         ProviderTurnEnd("end_turn"),
     ]
 
@@ -209,9 +237,11 @@ async def test_openai_provider_assembles_streamed_tool_call(
     events = [
         event
         async for event in provider.stream_chat(
-            [ChatMessage(role="user", content="读取 README")],
-            tools=tools,
-            system_prompt="system text",
+            ProviderRequest(
+                "system text",
+                (ChatMessage(role="user", content="读取 README"),),
+                tuple(tools),
+            )
         )
     ]
 
@@ -223,6 +253,7 @@ async def test_openai_provider_assembles_streamed_tool_call(
                 arguments_json='{"path":"README.md"}',
             )
         ),
+        OPENAI_USAGE_MISSING_EVENT,
         ProviderTurnEnd("tool_calls"),
     ]
     assert create.kwargs == {
@@ -233,6 +264,7 @@ async def test_openai_provider_assembles_streamed_tool_call(
         ],
         "max_tokens": 4096,
         "stream": True,
+        "stream_options": {"include_usage": True},
         "tools": tools,
     }
 
@@ -269,15 +301,23 @@ async def test_openai_provider_returns_multiple_tool_calls_in_index_order(
     events = [
         event
         async for event in provider.stream_chat(
-            [ChatMessage(role="user", content="读取两个文件")],
-            tools=[{"type": "function", "function": {"name": "read_file"}}],
-            system_prompt="system text",
+            ProviderRequest(
+                "system text",
+                (ChatMessage(role="user", content="读取两个文件"),),
+                (
+                    {
+                        "type": "function",
+                        "function": {"name": "read_file"},
+                    },
+                ),
+            )
         )
     ]
 
     assert events == [
         ProviderToolCall(ToolCall("call_1", "read_file", '{"path":"one"}')),
         ProviderToolCall(ToolCall("call_2", "read_file", '{"path":"two"}')),
+        OPENAI_USAGE_MISSING_EVENT,
         ProviderTurnEnd("tool_calls"),
     ]
 
@@ -286,23 +326,26 @@ def test_openai_provider_serializes_tool_history_with_reasoning() -> None:
     call = ToolCall("call_1", "read_file", '{"path":"README.md"}')
 
     request = OpenAIProvider._request_messages(
-        [
-            ChatMessage(
-                role="assistant",
-                content="",
-                tool_calls=(call,),
-                thinking_blocks=(
-                    ThinkingBlock("先分析"),
-                    ThinkingBlock("再调用"),
+        ProviderRequest(
+            "system text",
+            (
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=(call,),
+                    thinking_blocks=(
+                        ThinkingBlock("先分析"),
+                        ThinkingBlock("再调用"),
+                    ),
+                ),
+                ChatMessage(
+                    role="tool",
+                    content='{"success":true}',
+                    tool_call_id="call_1",
                 ),
             ),
-            ChatMessage(
-                role="tool",
-                content='{"success":true}',
-                tool_call_id="call_1",
-            ),
-        ],
-        system_prompt="system text",
+            None,
+        )
     )
 
     assert request == [
@@ -330,6 +373,124 @@ def test_openai_provider_serializes_tool_history_with_reasoning() -> None:
     ]
 
 
+def test_openai_request_keeps_stable_system_first_and_control_at_anchor() -> None:
+    before = ControlMessage(
+        "runtime.environment.session",
+        "context",
+        "session",
+        '{"shell":"powershell.exe"}',
+        1,
+        0,
+        None,
+        None,
+    )
+    after = ControlMessage(
+        "runtime.state.request_1.round_1",
+        "state",
+        "round",
+        "当前运行状态",
+        2,
+        1,
+        1,
+        1,
+    )
+
+    messages = OpenAIProvider._request_messages(
+        ProviderRequest(
+            "stable system",
+            (
+                before,
+                ChatMessage(role="user", content="任务"),
+                after,
+            ),
+            None,
+        )
+    )
+
+    assert [item["role"] for item in messages] == [
+        "system",
+        "system",
+        "user",
+        "system",
+    ]
+    assert messages[0] == {"role": "system", "content": "stable system"}
+    assert messages[1]["content"].startswith("<mewcode-control\n")
+    assert messages[2] == {"role": "user", "content": "任务"}
+    assert 'kind="state"' in messages[3]["content"]
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_emits_exact_available_usage_before_turn_end(
+    openai_config: ProviderConfig,
+) -> None:
+    create = FakeOpenAICreate(
+        FakeOpenAIStream(
+            [
+                make_chunk("OK", finish_reason="stop"),
+                make_chunk(
+                    None,
+                    with_choices=False,
+                    usage=openai_usage(),
+                ),
+            ]
+        )
+    )
+    provider = OpenAIProvider(
+        openai_config,
+        "test-secret",
+        client=make_client(create),
+    )
+
+    events = await collect(provider)
+
+    assert events[-2:] == [
+        ProviderUsageEvent(
+            ProviderUsageResult(
+                "available",
+                ProviderUsage(150, 120, 30, 9),
+                None,
+            )
+        ),
+        ProviderTurnEnd("end_turn"),
+    ]
+    assert create.kwargs["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.parametrize(
+    ("raw", "status", "reason"),
+    [
+        (
+            openai_usage(
+                prompt_tokens=0,
+                prompt_cache_hit_tokens=0,
+                prompt_cache_miss_tokens=0,
+                completion_tokens=0,
+            ),
+            "available",
+            None,
+        ),
+        (
+            openai_usage(prompt_cache_hit_tokens=None),
+            "invalid",
+            "openai_usage_fields_missing",
+        ),
+        (
+            openai_usage(prompt_tokens=149),
+            "invalid",
+            "openai_usage_invalid",
+        ),
+    ],
+)
+def test_openai_usage_mapping(
+    raw: Any,
+    status: str,
+    reason: str | None,
+) -> None:
+    result = OpenAIProvider._usage_result(raw)
+    assert result.status == status
+    assert result.reason == reason
+
+
 @pytest.mark.asyncio
 async def test_openai_provider_leaves_empty_response_for_agent_validation(
     openai_config: ProviderConfig,
@@ -341,7 +502,10 @@ async def test_openai_provider_leaves_empty_response_for_agent_validation(
         client=make_client(create),
     )
 
-    assert await collect(provider) == [ProviderTurnEnd("other")]
+    assert await collect(provider) == [
+        OPENAI_USAGE_MISSING_EVENT,
+        ProviderTurnEnd("other"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -359,6 +523,7 @@ async def test_openai_provider_preserves_whitespace_text_delta(
 
     assert await collect(provider) == [
         ProviderTextDelta("  \n"),
+        OPENAI_USAGE_MISSING_EVENT,
         ProviderTurnEnd("end_turn"),
     ]
 

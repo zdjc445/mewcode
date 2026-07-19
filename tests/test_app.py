@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+import inspect
 
 import pytest
 from textual.widgets import Button, Input, RichLog, Static, Switch
@@ -23,6 +24,7 @@ from mewcode_agent.agent import (
     UserMessageEvent,
 )
 from mewcode_agent.agent.context import AgentRunCancelled
+import mewcode_agent.app as app_module
 from mewcode_agent.app import ChatApp
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ChatMessage, ToolCall
@@ -218,6 +220,20 @@ def make_app(
 
 def render_log_text(log: RichLog) -> str:
     return "\n".join(strip.text for strip in log.lines)
+
+
+def test_app_has_no_prompt_assembly_or_provider_usage_dependency() -> None:
+    source = inspect.getsource(app_module)
+
+    for forbidden in (
+        "ProviderUsageEvent",
+        "ProviderUsageResult",
+        "PromptRuntime",
+        "PromptComposer",
+        "cache_hit_tokens",
+        "cache_miss_tokens",
+    ):
+        assert forbidden not in source
 
 
 @pytest.mark.asyncio

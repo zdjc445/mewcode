@@ -8,15 +8,20 @@ import pytest
 
 from mewcode_agent.config import ProviderConfig
 from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
+from mewcode_agent.prompting.models import ControlMessage
 from mewcode_agent.providers.anthropic_provider import AnthropicProvider
 from mewcode_agent.providers.base import (
     ProviderError,
+    ProviderRequest,
     ProviderStreamEvent,
     ProviderTextDelta,
     ProviderThinkingComplete,
     ProviderThinkingDelta,
     ProviderToolCall,
     ProviderTurnEnd,
+    ProviderUsage,
+    ProviderUsageEvent,
+    ProviderUsageResult,
 )
 
 
@@ -80,21 +85,50 @@ def text_delta(text: str) -> Any:
     )
 
 
-def message_delta(stop_reason: str | None) -> Any:
+def message_delta(
+    stop_reason: str | None,
+    usage: Any | None = None,
+) -> Any:
     return SimpleNamespace(
         type="message_delta",
         delta=SimpleNamespace(stop_reason=stop_reason),
+        usage=usage,
     )
+
+
+def request_for(
+    *items: ChatMessage | ControlMessage,
+) -> ProviderRequest:
+    return ProviderRequest("system text", tuple(items), None)
 
 
 async def collect(provider: AnthropicProvider) -> list[ProviderStreamEvent]:
     return [
         event
         async for event in provider.stream_chat(
-            [ChatMessage(role="user", content="你好")],
-            system_prompt="system text",
+            request_for(ChatMessage(role="user", content="你好"))
         )
     ]
+
+
+ANTHROPIC_USAGE_MISSING_EVENT = ProviderUsageEvent(
+    ProviderUsageResult(
+        "unavailable",
+        None,
+        "anthropic_usage_missing",
+    )
+)
+
+
+def anthropic_usage(**overrides: object) -> Any:
+    fields: dict[str, object] = {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 1536,
+        "input_tokens": 7,
+        "output_tokens": 13,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
 
 
 @pytest.mark.asyncio
@@ -117,11 +151,17 @@ async def test_anthropic_provider_streams_text_and_request_shape(
     assert events == [
         ProviderTextDelta("你"),
         ProviderTextDelta("好"),
+        ANTHROPIC_USAGE_MISSING_EVENT,
         ProviderTurnEnd("end_turn"),
     ]
     assert stream.kwargs == {
         "model": "deepseek-v4-pro",
-        "messages": [{"role": "user", "content": "你好"}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "你好"}],
+            }
+        ],
         "max_tokens": 4096,
         "system": "system text",
     }
@@ -174,6 +214,7 @@ async def test_anthropic_provider_maps_thinking_signature_and_stop_reason(
         ProviderThinkingDelta("先分析"),
         ProviderThinkingComplete(ThinkingBlock("先分析", "sig-1")),
         ProviderTextDelta("答案"),
+        ANTHROPIC_USAGE_MISSING_EVENT,
         ProviderTurnEnd("end_turn"),
     ]
 
@@ -219,9 +260,11 @@ async def test_anthropic_provider_assembles_streamed_tool_call(
     result = [
         event
         async for event in provider.stream_chat(
-            [ChatMessage(role="user", content="读取 README")],
-            tools=tools,
-            system_prompt="system text",
+            ProviderRequest(
+                "system text",
+                (ChatMessage(role="user", content="读取 README"),),
+                tuple(tools),
+            )
         )
     ]
 
@@ -233,11 +276,19 @@ async def test_anthropic_provider_assembles_streamed_tool_call(
                 arguments_json='{"path":"README.md"}',
             )
         ),
+        ANTHROPIC_USAGE_MISSING_EVENT,
         ProviderTurnEnd("tool_calls"),
     ]
     assert stream.kwargs == {
         "model": "deepseek-v4-pro",
-        "messages": [{"role": "user", "content": "读取 README"}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "读取 README"}
+                ],
+            }
+        ],
         "max_tokens": 4096,
         "system": "system text",
         "tools": tools,
@@ -282,15 +333,23 @@ async def test_anthropic_provider_returns_multiple_tool_calls_in_index_order(
     result = [
         event
         async for event in provider.stream_chat(
-            [ChatMessage(role="user", content="读取两个文件")],
-            tools=[{"name": "read_file", "input_schema": {"type": "object"}}],
-            system_prompt="system text",
+            ProviderRequest(
+                "system text",
+                (ChatMessage(role="user", content="读取两个文件"),),
+                (
+                    {
+                        "name": "read_file",
+                        "input_schema": {"type": "object"},
+                    },
+                ),
+            )
         )
     ]
 
     assert result == [
         ProviderToolCall(ToolCall("toolu_1", "read_file", '{"path":"one"}')),
         ProviderToolCall(ToolCall("toolu_2", "read_file", '{"path":"two"}')),
+        ANTHROPIC_USAGE_MISSING_EVENT,
         ProviderTurnEnd("tool_calls"),
     ]
 
@@ -300,24 +359,28 @@ def test_anthropic_provider_serializes_thinking_before_tool_use() -> None:
     second_call = ToolCall("toolu_2", "read_file", '{"path":"two"}')
 
     request = AnthropicProvider._request_messages(
-        [
-            ChatMessage(
-                role="assistant",
-                content="说明",
-                tool_calls=(first_call, second_call),
-                thinking_blocks=(ThinkingBlock("先分析", "sig-1"),),
+        ProviderRequest(
+            "system text",
+            (
+                ChatMessage(
+                    role="assistant",
+                    content="说明",
+                    tool_calls=(first_call, second_call),
+                    thinking_blocks=(ThinkingBlock("先分析", "sig-1"),),
+                ),
+                ChatMessage(
+                    role="tool",
+                    content='{"success":true}',
+                    tool_call_id="toolu_1",
+                ),
+                ChatMessage(
+                    role="tool",
+                    content='{"success":false}',
+                    tool_call_id="toolu_2",
+                ),
             ),
-            ChatMessage(
-                role="tool",
-                content='{"success":true}',
-                tool_call_id="toolu_1",
-            ),
-            ChatMessage(
-                role="tool",
-                content='{"success":false}',
-                tool_call_id="toolu_2",
-            ),
-        ]
+            None,
+        )
     )
 
     assert request == [
@@ -362,6 +425,191 @@ def test_anthropic_provider_serializes_thinking_before_tool_use() -> None:
     ]
 
 
+def test_anthropic_controls_merge_only_into_user_content_blocks() -> None:
+    call = ToolCall("toolu_1", "read_file", '{"path":"a"}')
+    controls = [
+        ControlMessage(
+            f"runtime.rule_{sequence}",
+            "instruction",
+            "round",
+            f"rule {sequence}",
+            sequence,
+            anchor,
+            1,
+            1,
+        )
+        for sequence, anchor in ((1, 0), (2, 1), (3, 3), (4, 4))
+    ]
+    request = ProviderRequest(
+        "stable",
+        (
+            controls[0],
+            ChatMessage(role="user", content="任务"),
+            controls[1],
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=(call,),
+            ),
+            ChatMessage(
+                role="tool",
+                content='{"success":true}',
+                tool_call_id="toolu_1",
+            ),
+            controls[2],
+            ChatMessage(role="assistant", content="继续"),
+            controls[3],
+        ),
+        None,
+    )
+
+    messages = AnthropicProvider._request_messages(request)
+
+    assert [item["role"] for item in messages] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
+    first_types = [block["type"] for block in messages[0]["content"]]
+    assert first_types == ["text", "text", "text"]
+    assert messages[0]["content"][1] == {"type": "text", "text": "任务"}
+    tool_types = [block["type"] for block in messages[2]["content"]]
+    assert tool_types == ["tool_result", "text"]
+    assert messages[3] == {"role": "assistant", "content": "继续"}
+    assert messages[4]["content"][0]["text"].startswith(
+        "<mewcode-control\n"
+    )
+    assert all(
+        not (
+            item["role"] == "assistant"
+            and isinstance(item["content"], list)
+            and any(
+                block.get("type") == "text"
+                and block.get("text", "").startswith("<mewcode-control")
+                for block in item["content"]
+            )
+        )
+        for item in messages
+    )
+
+
+def test_anthropic_merges_adjacent_user_messages() -> None:
+    request = ProviderRequest(
+        "stable",
+        (
+            ChatMessage(role="user", content="first"),
+            ChatMessage(role="user", content="second"),
+        ),
+        None,
+    )
+
+    assert AnthropicProvider._request_messages(request) == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+            ],
+        }
+    ]
+
+
+def test_control_after_assistant_creates_synthetic_user_message() -> None:
+    message = ControlMessage(
+        "runtime.rule_1",
+        "instruction",
+        "round",
+        "rule",
+        1,
+        1,
+        1,
+        1,
+    )
+    request = ProviderRequest(
+        "stable",
+        (ChatMessage(role="assistant", content="answer"), message),
+        None,
+    )
+
+    result = AnthropicProvider._request_messages(request)
+
+    assert result[0] == {"role": "assistant", "content": "answer"}
+    assert result[1]["role"] == "user"
+    assert result[1]["content"][0]["type"] == "text"
+    assert result[1]["content"][0]["text"].startswith(
+        "<mewcode-control\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_uses_only_final_message_delta_usage(
+    anthropic_config: ProviderConfig,
+) -> None:
+    events = [
+        SimpleNamespace(
+            type="message_start",
+            usage=anthropic_usage(
+                cache_read_input_tokens=0,
+                input_tokens=1543,
+                output_tokens=0,
+            ),
+        ),
+        text_delta("OK"),
+        message_delta("end_turn", usage=anthropic_usage()),
+    ]
+    stream = FakeAnthropicStream(FakeAnthropicEventManager(events))
+    provider = AnthropicProvider(
+        anthropic_config,
+        "test-secret",
+        client=make_client(stream),
+    )
+
+    result = await collect(provider)
+
+    assert result[-2:] == [
+        ProviderUsageEvent(
+            ProviderUsageResult(
+                "available",
+                ProviderUsage(1543, 1536, 7, 13),
+                None,
+            )
+        ),
+        ProviderTurnEnd("end_turn"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "status", "reason"),
+    [
+        (
+            anthropic_usage(cache_creation_input_tokens=None),
+            "available",
+            None,
+        ),
+        (
+            anthropic_usage(cache_creation_input_tokens=5),
+            "invalid",
+            "anthropic_cache_creation_nonzero",
+        ),
+        (
+            anthropic_usage(input_tokens=None),
+            "invalid",
+            "anthropic_usage_fields_missing",
+        ),
+    ],
+)
+def test_anthropic_usage_edge_cases(
+    raw: Any,
+    status: str,
+    reason: str | None,
+) -> None:
+    result = AnthropicProvider._usage_result(raw)
+    assert result.status == status
+    assert result.reason == reason
+
+
 @pytest.mark.asyncio
 async def test_anthropic_provider_leaves_empty_response_for_agent_validation(
     anthropic_config: ProviderConfig,
@@ -373,7 +621,10 @@ async def test_anthropic_provider_leaves_empty_response_for_agent_validation(
         client=make_client(stream),
     )
 
-    assert await collect(provider) == [ProviderTurnEnd("other")]
+    assert await collect(provider) == [
+        ANTHROPIC_USAGE_MISSING_EVENT,
+        ProviderTurnEnd("other"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -393,6 +644,7 @@ async def test_anthropic_provider_preserves_whitespace_text_delta(
 
     assert await collect(provider) == [
         ProviderTextDelta(" \n"),
+        ANTHROPIC_USAGE_MISSING_EVENT,
         ProviderTurnEnd("end_turn"),
     ]
 

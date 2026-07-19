@@ -9,9 +9,13 @@ import openai
 from openai import AsyncOpenAI
 
 from mewcode_agent.config import ProviderConfig
-from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
+from mewcode_agent.models import ThinkingBlock, ToolCall
+from mewcode_agent.prompting.composer import render_control_message
+from mewcode_agent.prompting.models import ControlMessage
 from mewcode_agent.providers.base import (
     ProviderError,
+    ProviderProtocol,
+    ProviderRequest,
     ProviderStopReason,
     ProviderStreamEvent,
     ProviderTextDelta,
@@ -19,6 +23,9 @@ from mewcode_agent.providers.base import (
     ProviderThinkingDelta,
     ProviderToolCall,
     ProviderTurnEnd,
+    ProviderUsage,
+    ProviderUsageEvent,
+    ProviderUsageResult,
 )
 
 OPENAI_STOP_REASON_MAP: dict[str, ProviderStopReason] = {
@@ -43,19 +50,29 @@ class OpenAIProvider:
         )
 
     @property
-    def protocol(self) -> str:
+    def provider_id(self) -> str:
+        return self._config.provider_id
+
+    @property
+    def protocol(self) -> ProviderProtocol:
         return "openai"
 
     @staticmethod
     def _request_messages(
-        messages: list[ChatMessage],
-        *,
-        system_prompt: str,
+        request: ProviderRequest,
     ) -> list[dict[str, Any]]:
         request_messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt}
+            {"role": "system", "content": request.system_prompt}
         ]
-        for message in messages:
+        for message in request.items:
+            if isinstance(message, ControlMessage):
+                request_messages.append(
+                    {
+                        "role": "system",
+                        "content": render_control_message(message),
+                    }
+                )
+                continue
             if message.role == "assistant" and message.tool_calls:
                 payload: dict[str, Any] = {
                     "role": "assistant",
@@ -91,32 +108,69 @@ class OpenAIProvider:
                 )
         return request_messages
 
+    @staticmethod
+    def _usage_result(raw_usage: Any | None) -> ProviderUsageResult:
+        if raw_usage is None:
+            return ProviderUsageResult(
+                "unavailable",
+                None,
+                "openai_usage_missing",
+            )
+        field_names = (
+            "prompt_tokens",
+            "prompt_cache_hit_tokens",
+            "prompt_cache_miss_tokens",
+            "completion_tokens",
+        )
+        values = tuple(
+            getattr(raw_usage, name, None) for name in field_names
+        )
+        if any(value is None for value in values):
+            return ProviderUsageResult(
+                "invalid",
+                None,
+                "openai_usage_fields_missing",
+            )
+        if any(type(value) is not int or value < 0 for value in values):
+            return ProviderUsageResult(
+                "invalid",
+                None,
+                "openai_usage_invalid",
+            )
+        try:
+            usage = ProviderUsage(*values)
+        except ValueError:
+            return ProviderUsageResult(
+                "invalid",
+                None,
+                "openai_usage_invalid",
+            )
+        return ProviderUsageResult("available", usage, None)
+
     async def stream_chat(
         self,
-        messages: list[ChatMessage],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-        system_prompt: str,
+        request: ProviderRequest,
     ) -> AsyncIterator[ProviderStreamEvent]:
-        request_messages = self._request_messages(
-            messages,
-            system_prompt=system_prompt,
-        )
         reasoning_parts: list[str] = []
         streamed_tool_calls: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
+        raw_usage: Any | None = None
 
         try:
-            request: dict[str, Any] = dict(
+            sdk_request: dict[str, Any] = dict(
                 model=self._config.model,
-                messages=request_messages,
+                messages=self._request_messages(request),
                 max_tokens=self._config.max_tokens,
                 stream=True,
+                stream_options={"include_usage": True},
             )
-            if tools:
-                request["tools"] = tools
-            stream = await self._client.chat.completions.create(**request)
+            if request.tools:
+                sdk_request["tools"] = list(request.tools)
+            stream = await self._client.chat.completions.create(**sdk_request)
             async for chunk in stream:
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    raw_usage = chunk_usage
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]
@@ -164,6 +218,7 @@ class OpenAIProvider:
                     raise ProviderError("模型返回了不完整的工具调用") from exc
                 for tool_call in tool_calls:
                     yield ProviderToolCall(tool_call)
+            yield ProviderUsageEvent(self._usage_result(raw_usage))
             yield ProviderTurnEnd(
                 OPENAI_STOP_REASON_MAP.get(finish_reason or "", "other")
             )

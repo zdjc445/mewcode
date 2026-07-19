@@ -24,37 +24,27 @@ from mewcode_agent.agent.events import (
     UserMessageEvent,
 )
 from mewcode_agent.agent.tool_scheduler import ToolScheduler
+from mewcode_agent.agent.usage import UsageCollector, UsageRecord
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ThinkingBlock, ToolCall
+from mewcode_agent.prompting.builtins import PLAN_APPROVED_TEXT
+from mewcode_agent.prompting.composer import PromptComposer
+from mewcode_agent.prompting.models import RuntimeInstruction
+from mewcode_agent.prompting.runtime import PromptRuntime
 from mewcode_agent.providers.base import (
     LLMProvider,
     ProviderError,
+    ProviderRequest,
     ProviderStreamEvent,
     ProviderTextDelta,
     ProviderThinkingComplete,
     ProviderThinkingDelta,
     ProviderToolCall,
     ProviderTurnEnd,
+    ProviderUsageEvent,
+    ProviderUsageResult,
 )
 from mewcode_agent.tools.registry import ToolRegistry
-
-EXECUTION_PROMPT = """\
-You are a coding agent. Use the available tools when needed.
-When the task is complete, return a final response without tool calls."""
-
-PLANNING_PROMPT = """\
-You are in plan-only mode. Inspect the project with read tools and produce
-an implementation plan. Write and command tools require user approval."""
-
-APPROVED_PLAN_PROMPT = """\
-The user approved the current plan. Execute it for this request.
-The approval expires when this request ends."""
-
-FINAL_ROUND_PROMPT = """\
-This is the final allowed model round. Do not request tools.
-Return the best final response using the available results."""
-
-APPROVED_PLAN_CONTROL_MESSAGE = "计划已批准，请执行当前计划。"
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +65,7 @@ class _RoundData:
     thinking_blocks: list[ThinkingBlock] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
     saw_thinking: bool = False
+    usage_result: ProviderUsageResult | None = None
     turn_end: ProviderTurnEnd | None = None
 
 
@@ -101,13 +92,19 @@ class AgentLoop:
         provider: LLMProvider,
         registry: ToolRegistry,
         *,
+        prompt_runtime: PromptRuntime,
+        prompt_composer: PromptComposer,
         config: AgentLoopConfig | None = None,
         scheduler: ToolScheduler | None = None,
+        usage_collector: UsageCollector | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
+        self._prompt_runtime = prompt_runtime
+        self._prompt_composer = prompt_composer
         self._config = config or AgentLoopConfig()
         self._scheduler = scheduler or ToolScheduler(registry)
+        self._usage_collector = usage_collector
 
     async def run(
         self,
@@ -121,12 +118,29 @@ class AgentLoop:
             raise ValueError("user_message 必须为非空字符串")
 
         context.begin_run()
-        state: AgentRunState = "planning" if plan_only else "executing"
+        initial_mode: AgentRunMode = (
+            "planning" if plan_only else "executing"
+        )
+        state: AgentRunState = initial_mode
         current_request_authorized = False
         round_number = 0
-        history.add_user(user_message)
+        request_started = False
 
         try:
+            try:
+                request_sequence = await self._prompt_runtime.begin_request(
+                    history_length=len(history.snapshot()),
+                    mode=initial_mode,
+                )
+            except (ValueError, RuntimeError):
+                state = "failed"
+                yield RunErrorEvent(
+                    "prompt_error",
+                    "无法生成本轮模型请求",
+                )
+                return
+            request_started = True
+            history.add_user(user_message)
             yield UserMessageEvent(user_message)
 
             while round_number < self._config.max_rounds:
@@ -146,183 +160,244 @@ class AgentLoop:
                 )
 
                 is_final_round = round_number == self._config.max_rounds
-                tools = (
-                    None
-                    if is_final_round
-                    else self._registry.api_tools(self._provider.protocol)
-                )
-                system_prompt = self._system_prompt(
-                    mode=mode,
-                    current_request_authorized=current_request_authorized,
-                    is_final_round=is_final_round,
-                )
-                round_data = _RoundData()
-
+                round_started = False
                 try:
-                    provider_stream = self._provider.stream_chat(
-                        history.snapshot(),
-                        tools=tools,
-                        system_prompt=system_prompt,
-                    )
-                    async for event in self._consume_provider_round(
-                        provider_stream,
-                        context=context,
-                        round_data=round_data,
-                    ):
-                        yield event
-                except AgentRunCancelled:
-                    state = "cancelled"
-                    yield RunCancelledEvent("user_cancelled")
-                    return
-                except TimeoutError:
-                    state = "failed"
-                    yield RunErrorEvent(
-                        "llm_timeout",
-                        (
-                            "模型单轮调用超过 "
-                            f"{self._config.llm_timeout_seconds:g} 秒"
-                        ),
-                    )
-                    return
-                except ProviderError as exc:
-                    state = "failed"
-                    yield RunErrorEvent("provider_error", str(exc))
-                    return
-                except _AgentLoopFailure as exc:
-                    state = "failed"
-                    yield RunErrorEvent(exc.code, exc.message)
-                    return
-                except Exception:
-                    state = "failed"
-                    yield RunErrorEvent("provider_error", "模型调用失败")
-                    return
+                    try:
+                        self._prompt_runtime.begin_round(
+                            history_length=len(history.snapshot()),
+                            round_number=round_number,
+                            max_rounds=self._config.max_rounds,
+                            mode=mode,
+                        )
+                        round_started = True
+                        self._prompt_runtime.seal_round()
+                        frame = self._prompt_composer.compose(
+                            history.snapshot(),
+                            self._prompt_runtime.timeline(),
+                        )
+                        api_tools = (
+                            None
+                            if is_final_round
+                            else self._registry.api_tools(
+                                self._provider.protocol
+                            )
+                        )
+                        provider_request = ProviderRequest(
+                            frame.system_prompt,
+                            frame.items,
+                            (
+                                tuple(api_tools)
+                                if api_tools is not None
+                                else None
+                            ),
+                        )
+                    except (ValueError, RuntimeError):
+                        state = "failed"
+                        yield RunErrorEvent(
+                            "prompt_error",
+                            "无法生成本轮模型请求",
+                        )
+                        return
 
-                turn_end = round_data.turn_end
-                if turn_end is None:
-                    state = "failed"
-                    yield RunErrorEvent(
-                        "invalid_provider_stream",
-                        "Provider 流缺少结束事件",
-                    )
-                    return
-
-                has_tool_calls = bool(round_data.tool_calls)
-                if is_final_round and has_tool_calls:
-                    state = "failed"
-                    yield RunErrorEvent(
-                        "max_rounds_exceeded",
-                        "最终模型轮仍返回了工具调用",
-                    )
-                    return
-
-                if (
-                    has_tool_calls
-                    and round_data.saw_thinking
-                    and not round_data.thinking_blocks
-                ):
-                    state = "failed"
-                    yield RunErrorEvent(
-                        "invalid_provider_stream",
-                        "工具调用轮缺少完整 thinking 元数据",
-                    )
-                    return
-
-                if turn_end.stop_reason == "max_tokens":
-                    state = "failed"
-                    yield RunErrorEvent(
-                        "max_tokens_reached",
-                        "模型达到 Token 上限，未能完成当前响应",
-                    )
-                    return
-
-                if has_tool_calls != (
-                    turn_end.stop_reason == "tool_calls"
-                ):
-                    state = "failed"
-                    yield RunErrorEvent(
-                        "invalid_provider_stream",
-                        "Provider 停止原因与工具调用不一致",
-                    )
-                    return
-
-                if has_tool_calls:
-                    history.add_assistant_tool_calls(
-                        "".join(round_data.text_parts),
-                        tuple(round_data.tool_calls),
-                        thinking_blocks=tuple(round_data.thinking_blocks),
-                    )
-                    async for event in self._scheduler.run(
-                        tuple(round_data.tool_calls),
-                        plan_only=plan_only,
-                        current_request_authorized=(
-                            current_request_authorized
-                        ),
-                        context=context,
-                    ):
-                        if isinstance(event, ToolResultEvent):
-                            history.add_tool_result(event.call_id, event.result)
-                        yield event
-                    if context.cancelled:
+                    round_data = _RoundData()
+                    try:
+                        provider_stream = self._provider.stream_chat(
+                            provider_request
+                        )
+                        async for event in self._consume_provider_round(
+                            provider_stream,
+                            context=context,
+                            round_data=round_data,
+                        ):
+                            yield event
+                    except AgentRunCancelled:
                         state = "cancelled"
                         yield RunCancelledEvent("user_cancelled")
                         return
-                    continue
+                    except TimeoutError:
+                        state = "failed"
+                        yield RunErrorEvent(
+                            "llm_timeout",
+                            (
+                                "模型单轮调用超过 "
+                                f"{self._config.llm_timeout_seconds:g} 秒"
+                            ),
+                        )
+                        return
+                    except ProviderError as exc:
+                        state = "failed"
+                        yield RunErrorEvent("provider_error", str(exc))
+                        return
+                    except _AgentLoopFailure as exc:
+                        state = "failed"
+                        yield RunErrorEvent(exc.code, exc.message)
+                        return
+                    except Exception:
+                        state = "failed"
+                        yield RunErrorEvent(
+                            "provider_error",
+                            "模型调用失败",
+                        )
+                        return
 
-                content = "".join(round_data.text_parts)
-                if not content.strip():
-                    state = "failed"
-                    if round_data.saw_thinking:
+                    if self._usage_collector is not None:
+                        assert round_data.usage_result is not None
+                        self._usage_collector.record(
+                            UsageRecord(
+                                self._provider.provider_id,
+                                request_sequence,
+                                round_number,
+                                mode,
+                                round_data.usage_result,
+                            )
+                        )
+
+                    turn_end = round_data.turn_end
+                    if turn_end is None:
+                        state = "failed"
                         yield RunErrorEvent(
                             "invalid_provider_stream",
-                            "Provider 只返回了 thinking，没有正文",
+                            "Provider 流缺少结束事件",
                         )
-                    else:
+                        return
+
+                    has_tool_calls = bool(round_data.tool_calls)
+                    if is_final_round and has_tool_calls:
+                        state = "failed"
                         yield RunErrorEvent(
-                            "empty_response",
-                            "模型没有返回正文、thinking 或工具调用",
+                            "max_rounds_exceeded",
+                            "最终模型轮仍返回了工具调用",
                         )
-                    return
+                        return
 
-                if mode == "executing":
+                    if (
+                        has_tool_calls
+                        and round_data.saw_thinking
+                        and not round_data.thinking_blocks
+                    ):
+                        state = "failed"
+                        yield RunErrorEvent(
+                            "invalid_provider_stream",
+                            "工具调用轮缺少完整 thinking 元数据",
+                        )
+                        return
+
+                    if turn_end.stop_reason == "max_tokens":
+                        state = "failed"
+                        yield RunErrorEvent(
+                            "max_tokens_reached",
+                            "模型达到 Token 上限，未能完成当前响应",
+                        )
+                        return
+
+                    if has_tool_calls != (
+                        turn_end.stop_reason == "tool_calls"
+                    ):
+                        state = "failed"
+                        yield RunErrorEvent(
+                            "invalid_provider_stream",
+                            "Provider 停止原因与工具调用不一致",
+                        )
+                        return
+
+                    if has_tool_calls:
+                        history.add_assistant_tool_calls(
+                            "".join(round_data.text_parts),
+                            tuple(round_data.tool_calls),
+                            thinking_blocks=tuple(
+                                round_data.thinking_blocks
+                            ),
+                        )
+                        async for event in self._scheduler.run(
+                            tuple(round_data.tool_calls),
+                            plan_only=plan_only,
+                            current_request_authorized=(
+                                current_request_authorized
+                            ),
+                            context=context,
+                        ):
+                            if isinstance(event, ToolResultEvent):
+                                history.add_tool_result(
+                                    event.call_id,
+                                    event.result,
+                                )
+                            yield event
+                        if context.cancelled:
+                            state = "cancelled"
+                            yield RunCancelledEvent("user_cancelled")
+                            return
+                        continue
+
+                    content = "".join(round_data.text_parts)
+                    if not content.strip():
+                        state = "failed"
+                        if round_data.saw_thinking:
+                            yield RunErrorEvent(
+                                "invalid_provider_stream",
+                                "Provider 只返回了 thinking，没有正文",
+                            )
+                        else:
+                            yield RunErrorEvent(
+                                "empty_response",
+                                "模型没有返回正文、thinking 或工具调用",
+                            )
+                        return
+
+                    if mode == "executing":
+                        history.add_assistant(content)
+                        state = "completed"
+                        yield FinalResponseEvent(content, round_number)
+                        return
+
                     history.add_assistant(content)
-                    state = "completed"
-                    yield FinalResponseEvent(content, round_number)
-                    return
-
-                history.add_assistant(content)
-                state = "waiting_plan_approval"
-                request_id = context.open_plan_approval()
-                yield PlanApprovalRequestedEvent(
-                    request_id=request_id,
-                    plan=content,
-                    can_execute=not is_final_round,
-                    can_request_changes=not is_final_round,
-                )
-                try:
-                    resolution = await context.wait_for_plan_approval(
-                        request_id
+                    state = "waiting_plan_approval"
+                    request_id = context.open_plan_approval()
+                    yield PlanApprovalRequestedEvent(
+                        request_id=request_id,
+                        plan=content,
+                        can_execute=not is_final_round,
+                        can_request_changes=not is_final_round,
                     )
-                except AgentRunCancelled:
-                    state = "cancelled"
-                    yield RunCancelledEvent("user_cancelled")
-                    return
+                    try:
+                        resolution = await context.wait_for_plan_approval(
+                            request_id
+                        )
+                    except AgentRunCancelled:
+                        state = "cancelled"
+                        yield RunCancelledEvent("user_cancelled")
+                        return
 
-                if is_final_round:
-                    state = "cancelled"
-                    yield RunCancelledEvent("round_limit_after_plan")
-                    return
-                if resolution.decision == "execute_current":
-                    history.add_user(APPROVED_PLAN_CONTROL_MESSAGE)
-                    current_request_authorized = True
-                    state = "executing"
-                elif resolution.decision == "request_changes":
-                    history.add_user(resolution.feedback)
-                    state = "planning"
-                    yield UserMessageEvent(resolution.feedback)
-                else:
-                    state = "cancelled"
-                    yield RunCancelledEvent("plan_rejected")
-                    return
+                    if is_final_round:
+                        state = "cancelled"
+                        yield RunCancelledEvent("round_limit_after_plan")
+                        return
+                    if resolution.decision == "execute_current":
+                        self._prompt_runtime.inject(
+                            RuntimeInstruction(
+                                (
+                                    "runtime.plan.approved."
+                                    f"request_{request_sequence}"
+                                ),
+                                "instruction",
+                                "request",
+                                PLAN_APPROVED_TEXT,
+                                "plan_approval",
+                            ),
+                            history_length=len(history.snapshot()),
+                        )
+                        current_request_authorized = True
+                        state = "executing"
+                    elif resolution.decision == "request_changes":
+                        history.add_user(resolution.feedback)
+                        state = "planning"
+                        yield UserMessageEvent(resolution.feedback)
+                    else:
+                        state = "cancelled"
+                        yield RunCancelledEvent("plan_rejected")
+                        return
+                finally:
+                    if round_started:
+                        self._prompt_runtime.end_round()
 
             state = "failed"
             yield RunErrorEvent(
@@ -330,6 +405,8 @@ class AgentLoop:
                 "当前请求已达到模型轮数上限",
             )
         finally:
+            if request_started:
+                self._prompt_runtime.end_request()
             context.finish_run()
 
     async def _consume_provider_round(
@@ -379,6 +456,14 @@ class AgentLoop:
                         "invalid_provider_stream",
                         "Provider 结束事件之后仍返回了内容",
                     )
+                if (
+                    round_data.usage_result is not None
+                    and not isinstance(item, ProviderTurnEnd)
+                ):
+                    raise _AgentLoopFailure(
+                        "invalid_provider_stream",
+                        "Provider usage 事件缺失、重复或位置错误",
+                    )
                 if isinstance(item, ProviderThinkingDelta):
                     round_data.saw_thinking = True
                     yield ModelThinkingEvent(item.text)
@@ -390,7 +475,25 @@ class AgentLoop:
                     yield ModelTextEvent(item.text)
                 elif isinstance(item, ProviderToolCall):
                     round_data.tool_calls.append(item.tool_call)
+                elif isinstance(item, ProviderUsageEvent):
+                    if round_data.usage_result is not None:
+                        raise _AgentLoopFailure(
+                            "invalid_provider_stream",
+                            (
+                                "Provider usage 事件缺失、重复或"
+                                "位置错误"
+                            ),
+                        )
+                    round_data.usage_result = item.result
                 elif isinstance(item, ProviderTurnEnd):
+                    if round_data.usage_result is None:
+                        raise _AgentLoopFailure(
+                            "invalid_provider_stream",
+                            (
+                                "Provider usage 事件缺失、重复或"
+                                "位置错误"
+                            ),
+                        )
                     round_data.turn_end = item
                 else:
                     raise _AgentLoopFailure(
@@ -409,17 +512,3 @@ class AgentLoop:
                 producer_task.cancel()
             with suppress(asyncio.CancelledError):
                 await producer_task
-
-    @staticmethod
-    def _system_prompt(
-        *,
-        mode: AgentRunMode,
-        current_request_authorized: bool,
-        is_final_round: bool,
-    ) -> str:
-        parts = [PLANNING_PROMPT if mode == "planning" else EXECUTION_PROMPT]
-        if current_request_authorized:
-            parts.append(APPROVED_PLAN_PROMPT)
-        if is_final_round:
-            parts.append(FINAL_ROUND_PROMPT)
-        return "\n".join(parts)

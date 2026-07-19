@@ -28,6 +28,7 @@ from mewcode_agent.agent.tool_scheduler import (
     ToolScheduler,
     ToolSchedulerEvent,
 )
+from mewcode_agent.agent.usage import UsageCollector, UsageRecord
 from mewcode_agent.agent.loop import AgentLoop, AgentLoopConfig
 
 __all__ = [
@@ -54,5 +55,7 @@ __all__ = [
     "ToolResultEvent",
     "ToolScheduler",
     "ToolSchedulerEvent",
+    "UsageCollector",
+    "UsageRecord",
     "UserMessageEvent",
 ]

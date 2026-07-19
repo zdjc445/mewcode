@@ -10,9 +10,13 @@ import anthropic
 from anthropic import AsyncAnthropic
 
 from mewcode_agent.config import ProviderConfig
-from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
+from mewcode_agent.models import ThinkingBlock, ToolCall
+from mewcode_agent.prompting.composer import render_control_message
+from mewcode_agent.prompting.models import ControlMessage
 from mewcode_agent.providers.base import (
     ProviderError,
+    ProviderProtocol,
+    ProviderRequest,
     ProviderStopReason,
     ProviderStreamEvent,
     ProviderTextDelta,
@@ -20,6 +24,9 @@ from mewcode_agent.providers.base import (
     ProviderThinkingDelta,
     ProviderToolCall,
     ProviderTurnEnd,
+    ProviderUsage,
+    ProviderUsageEvent,
+    ProviderUsageResult,
 )
 
 ANTHROPIC_STOP_REASON_MAP: dict[str, ProviderStopReason] = {
@@ -44,14 +51,60 @@ class AnthropicProvider:
         )
 
     @property
-    def protocol(self) -> str:
+    def provider_id(self) -> str:
+        return self._config.provider_id
+
+    @property
+    def protocol(self) -> ProviderProtocol:
         return "anthropic"
 
     @staticmethod
-    def _request_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    def _append_user_blocks(
+        messages: list[dict[str, Any]],
+        blocks: list[dict[str, Any]],
+    ) -> None:
+        if messages and messages[-1]["role"] == "user":
+            current = messages[-1]["content"]
+            if isinstance(current, str):
+                current = [{"type": "text", "text": current}]
+                messages[-1]["content"] = current
+            current.extend(blocks)
+        else:
+            messages.append({"role": "user", "content": list(blocks)})
+
+    @staticmethod
+    def _request_messages(request: ProviderRequest) -> list[dict[str, Any]]:
         request_messages: list[dict[str, Any]] = []
-        for message in messages:
-            if message.role == "assistant" and message.tool_calls:
+        for item in request.items:
+            if isinstance(item, ControlMessage):
+                AnthropicProvider._append_user_blocks(
+                    request_messages,
+                    [
+                        {
+                            "type": "text",
+                            "text": render_control_message(item),
+                        }
+                    ],
+                )
+                continue
+            message = item
+            if message.role == "user":
+                AnthropicProvider._append_user_blocks(
+                    request_messages,
+                    [{"type": "text", "text": message.content}],
+                )
+            elif message.role == "tool":
+                AnthropicProvider._append_user_blocks(
+                    request_messages,
+                    [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": message.tool_call_id,
+                            "content": message.content,
+                        }
+                    ],
+                )
+            elif message.role == "assistant" and message.tool_calls:
                 content: list[dict[str, Any]] = []
                 for block in message.thinking_blocks:
                     content.append(
@@ -79,56 +132,78 @@ class AnthropicProvider:
                         }
                     )
                 request_messages.append({"role": "assistant", "content": content})
-            elif message.role == "tool":
-                result_block = {
-                    "type": "tool_result",
-                    "tool_use_id": message.tool_call_id,
-                    "content": message.content,
-                }
-                previous = request_messages[-1] if request_messages else None
-                if (
-                    previous is not None
-                    and previous["role"] == "user"
-                    and isinstance(previous["content"], list)
-                    and all(
-                        block.get("type") == "tool_result"
-                        for block in previous["content"]
-                    )
-                ):
-                    previous["content"].append(result_block)
-                else:
-                    request_messages.append(
-                        {"role": "user", "content": [result_block]}
-                    )
             else:
                 request_messages.append(
-                    {"role": message.role, "content": message.content}
+                    {"role": "assistant", "content": message.content}
                 )
         return request_messages
 
+    @staticmethod
+    def _usage_result(raw: Any | None) -> ProviderUsageResult:
+        if raw is None:
+            return ProviderUsageResult(
+                "unavailable",
+                None,
+                "anthropic_usage_missing",
+            )
+        cache_creation = getattr(
+            raw,
+            "cache_creation_input_tokens",
+            None,
+        )
+        if cache_creation not in (None, 0):
+            return ProviderUsageResult(
+                "invalid",
+                None,
+                "anthropic_cache_creation_nonzero",
+            )
+        cache_read = getattr(raw, "cache_read_input_tokens", None)
+        input_tokens = getattr(raw, "input_tokens", None)
+        output_tokens = getattr(raw, "output_tokens", None)
+        if any(
+            value is None
+            for value in (cache_read, input_tokens, output_tokens)
+        ):
+            return ProviderUsageResult(
+                "invalid",
+                None,
+                "anthropic_usage_fields_missing",
+            )
+        try:
+            usage = ProviderUsage(
+                prompt_tokens=cache_read + input_tokens,
+                cache_hit_tokens=cache_read,
+                cache_miss_tokens=input_tokens,
+                completion_tokens=output_tokens,
+            )
+        except (TypeError, ValueError):
+            return ProviderUsageResult(
+                "invalid",
+                None,
+                "anthropic_usage_invalid",
+            )
+        return ProviderUsageResult("available", usage, None)
+
     async def stream_chat(
         self,
-        messages: list[ChatMessage],
-        *,
-        tools: list[dict[str, Any]] | None = None,
-        system_prompt: str,
+        request: ProviderRequest,
     ) -> AsyncIterator[ProviderStreamEvent]:
-        request_messages = self._request_messages(messages)
         thinking_blocks: dict[int, dict[str, str]] = {}
         streamed_tool_calls: dict[int, dict[str, str]] = {}
         stop_reason: str | None = None
+        final_usage: Any | None = None
 
         try:
-            request: dict[str, Any] = dict(
+            sdk_request: dict[str, Any] = dict(
                 model=self._config.model,
-                messages=request_messages,
+                messages=self._request_messages(request),
                 max_tokens=self._config.max_tokens,
-                system=system_prompt,
+                system=request.system_prompt,
             )
-            if tools:
-                request["tools"] = tools
-                request["tool_choice"] = {"type": "auto"}
-            async with self._client.messages.stream(**request) as stream:
+            if request.tools:
+                sdk_request["tools"] = list(request.tools)
+                sdk_request["tool_choice"] = {"type": "auto"}
+            async with self._client.messages.stream(**sdk_request) as stream:
                 async for event in stream:
                     if event.type == "content_block_start":
                         block = event.content_block
@@ -197,6 +272,7 @@ class AnthropicProvider:
                                 )
                             )
                     elif event.type == "message_delta":
+                        final_usage = getattr(event, "usage", None)
                         stop_reason = (
                             getattr(event.delta, "stop_reason", None)
                             or stop_reason
@@ -216,6 +292,7 @@ class AnthropicProvider:
                     raise ProviderError("模型返回了不完整的工具调用") from exc
                 for tool_call in tool_calls:
                     yield ProviderToolCall(tool_call)
+            yield ProviderUsageEvent(self._usage_result(final_usage))
             yield ProviderTurnEnd(
                 ANTHROPIC_STOP_REASON_MAP.get(stop_reason or "", "other")
             )
