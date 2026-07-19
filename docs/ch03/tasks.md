@@ -5,19 +5,19 @@
 - 规格：已批准，见 `docs/ch03/spec.md`
 - 实施计划：已编写，见 `docs/ch03/plan.md`
 - 实现授权：用户已授权落地实现
-- 当前阶段：等待选择执行方式，业务代码尚未开始修改
+- 当前阶段：Task 1–9 已完成；Task 10 的离线实现与验收已完成，真实 API 评估因当前进程未设置 `DEEPSEEK_API_KEY` 而未执行
 
 ## 任务清单
 
-- [ ] Task 1：建立不可变 Prompt 数据模型、9 个中文内置静态模块和运行时正文。
-- [ ] Task 2：实现用户全局与项目两层 Prompt YAML 的严格加载、精确覆盖、禁用、保护和排序。
-- [ ] Task 3：实现会话环境、请求环境、Git 三态、异步参数化 Git 命令和固定 JSON。
-- [ ] Task 4：实现 `PromptRuntime` 显式生命周期、追加式控制时间线、`PromptComposer` 和安全标签渲染。
-- [ ] Task 5：建立 `ProviderRequest`、统一 usage 结果/事件及可选 `UsageCollector` 契约。
-- [ ] Task 6：迁移 OpenAI Provider，按时间线降低控制消息并解析精确缓存 usage 字段。
-- [ ] Task 7：迁移 Anthropic Provider，按确定规则合并控制块并映射真实确认的 usage 字段。
-- [ ] Task 8：把 Prompt 生命周期和 usage 消费接入 `AgentLoop`，移除硬编码 Prompt 与计划批准伪 user 历史。
-- [ ] Task 9：完成 CLI 启动组装、工具描述双重关键规则、TUI 隔离回归和 README 配置说明。
+- [x] Task 1：建立不可变 Prompt 数据模型、9 个中文内置静态模块和运行时正文。
+- [x] Task 2：实现用户全局与项目两层 Prompt YAML 的严格加载、精确覆盖、禁用、保护和排序。
+- [x] Task 3：实现会话环境、请求环境、Git 三态、异步参数化 Git 命令和固定 JSON。
+- [x] Task 4：实现 `PromptRuntime` 显式生命周期、追加式控制时间线、`PromptComposer` 和安全标签渲染。
+- [x] Task 5：建立 `ProviderRequest`、统一 usage 结果/事件及可选 `UsageCollector` 契约。
+- [x] Task 6：迁移 OpenAI Provider，按时间线降低控制消息并解析精确缓存 usage 字段。
+- [x] Task 7：迁移 Anthropic Provider，按确定规则合并控制块并映射真实确认的 usage 字段。
+- [x] Task 8：把 Prompt 生命周期和 usage 消费接入 `AgentLoop`，移除硬编码 Prompt 与计划批准伪 user 历史。
+- [x] Task 9：完成 CLI 启动组装、工具描述双重关键规则、TUI 隔离回归和 README 配置说明。
 - [ ] Task 10：完成无网络全量回归、真实双 Provider 缓存报告、人工行为评估和最终验收。
 
 ## 顺序约束

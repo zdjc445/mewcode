@@ -7,6 +7,12 @@ import pytest
 
 from mewcode_agent.config import load_config
 from mewcode_agent.models import ChatMessage
+from mewcode_agent.providers.base import (
+    ProviderRequest,
+    ProviderTextDelta,
+    ProviderTurnEnd,
+    ProviderUsageEvent,
+)
 from mewcode_agent.providers.factory import create_provider
 
 pytestmark = pytest.mark.integration
@@ -22,11 +28,22 @@ async def test_real_deepseek_streaming(provider_id: str) -> None:
     provider_config = config.providers[provider_id]
     provider = create_provider(provider_config, config.api_key)
 
-    chunks = [
-        chunk
-        async for chunk in provider.stream_chat(
-            [ChatMessage(role="user", content="只回复 OK")]
-        )
-    ]
-
-    assert "".join(chunks).strip()
+    request = ProviderRequest(
+        system_prompt="你是集成测试助手。",
+        items=(ChatMessage(role="user", content="只回复 OK"),),
+        tools=None,
+    )
+    events = [event async for event in provider.stream_chat(request)]
+    text = "".join(
+        event.text
+        for event in events
+        if isinstance(event, ProviderTextDelta)
+    )
+    usage_index = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, ProviderUsageEvent)
+    )
+    assert text.strip()
+    assert isinstance(events[-1], ProviderTurnEnd)
+    assert usage_index == len(events) - 2

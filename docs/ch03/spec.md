@@ -2,8 +2,8 @@
 
 ## 1. 文档状态
 
-- 状态：规格已由用户审核通过，详细实施计划与验收文档已编写
-- 实现目标：用户已明确要求落地实现；当前等待选择计划执行方式，业务代码尚未开始修改
+- 状态：规格已由用户审核通过，Task 1–9 与 Task 10 离线部分已实现并通过验收
+- 实现目标：真实双 Provider 流与五类缓存场景因当前进程未设置 `DEEPSEEK_API_KEY` 而未执行；准确结果见 `docs/ch03/evaluation.md`
 - 前置实现：Chapter 02 ReAct Agent 循环、双协议 Provider、工具系统、plan-only 与审批
 - 本章目标：把当前硬编码的最小 System Prompt 重构为可配置、可排序、可按运行时作用域注入的 Prompt 子系统，并通过真实 usage 数据评估 DeepSeek 自动上下文缓存。
 
@@ -1412,4 +1412,4 @@ uv run pytest integration_tests/test_prompt_cache.py -m integration -s
 - 外部配置、环境采集、错误模型、测试矩阵和验收标准具有可执行的精确约束；
 - 本章范围可以拆入一个顺序化实施计划，不需要再分成独立章节。
 
-用户已完成本文档的最终审核。`plan.md`、`tasks.md` 和 `checklist.md` 已创建并完成相互追踪；下一阶段按 `plan.md` 的 Task 1–10 顺序执行代码实现。
+用户已完成本文档的最终审核。Task 1–9 与 Task 10 的离线代码、报告结构、默认测试和行为边界已经实现；真实 API 项目保持未完成状态，未用模拟响应替代真实缓存证据。
