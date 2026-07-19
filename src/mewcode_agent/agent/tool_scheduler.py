@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+import json
 from typing import Protocol, TypeAlias
 
 from mewcode_agent.agent.context import AgentRunCancelled, AgentRunContext
@@ -13,6 +14,11 @@ from mewcode_agent.agent.events import (
     ToolResultEvent,
 )
 from mewcode_agent.models import ToolCall
+from mewcode_agent.security.models import (
+    PolicyDecision,
+    SecurityRequest,
+)
+from mewcode_agent.security.policy import SecurityPolicyEngine
 from mewcode_agent.tools.base import Tool, ToolResult
 from mewcode_agent.tools.registry import ToolRegistry
 
@@ -63,9 +69,11 @@ class ToolScheduler:
         registry: ToolRegistry,
         *,
         interceptor: ToolExecutionInterceptor | None = None,
+        policy_engine: SecurityPolicyEngine | None = None,
     ) -> None:
         self._registry = registry
         self._interceptor = interceptor or NoOpToolExecutionInterceptor()
+        self._policy_engine = policy_engine
 
     async def run(
         self,
@@ -104,9 +112,61 @@ class ToolScheduler:
                     read_group.append((grouped_call, grouped_tool))
                     group_end += 1
 
+                authorized_reads: list[tuple[ToolCall, Tool]] = []
+                blocked_results: dict[str, ToolResult] = {}
                 for grouped_call, grouped_tool in read_group:
+                    security = self._evaluate_security(
+                        grouped_call,
+                        grouped_tool,
+                        current_request_authorized=current_request_authorized,
+                    )
+                    if security is None:
+                        authorized_reads.append((grouped_call, grouped_tool))
+                        continue
+                    request, policy_decision = security
+                    if policy_decision.action == "deny":
+                        blocked_results[grouped_call.call_id] = (
+                            self._policy_denied_result(
+                                grouped_call,
+                                policy_decision,
+                            )
+                        )
+                        continue
+                    if policy_decision.action == "allow":
+                        authorized_reads.append((grouped_call, grouped_tool))
+                        continue
+
+                    approval_id = context.open_tool_approval()
+                    yield self._approval_event(
+                        approval_id,
+                        grouped_call,
+                        grouped_tool,
+                        policy_decision,
+                    )
+                    try:
+                        approval_result = await self._resolve_approval(
+                            context,
+                            approval_id,
+                            request,
+                        )
+                    except AgentRunCancelled:
+                        for event in self._cancelled_events(
+                            tool_calls[index:]
+                        ):
+                            yield event
+                        return
+                    if approval_result is None:
+                        authorized_reads.append((grouped_call, grouped_tool))
+                    else:
+                        blocked_results[grouped_call.call_id] = approval_result
+
+                if context.cancelled:
+                    for event in self._cancelled_events(tool_calls[index:]):
+                        yield event
+                    return
+                for grouped_call, grouped_tool in authorized_reads:
                     yield self._started_event(grouped_call, grouped_tool)
-                results = await asyncio.gather(
+                executed_results = await asyncio.gather(
                     *(
                         self._execute_one(
                             grouped_call,
@@ -115,19 +175,66 @@ class ToolScheduler:
                                 current_request_authorized
                             ),
                         )
-                        for grouped_call, _ in read_group
+                        for grouped_call, _ in authorized_reads
                     )
                 )
-                for (grouped_call, _), result in zip(
-                    read_group,
-                    results,
-                    strict=True,
-                ):
+                executed_by_call = {
+                    grouped_call.call_id: result
+                    for (grouped_call, _), result in zip(
+                        authorized_reads,
+                        executed_results,
+                        strict=True,
+                    )
+                }
+                for grouped_call, _ in read_group:
+                    result = blocked_results.get(
+                        grouped_call.call_id,
+                        executed_by_call.get(grouped_call.call_id),
+                    )
+                    assert result is not None
                     yield ToolResultEvent(grouped_call.call_id, result)
                 index = group_end
                 continue
 
-            if plan_only and not current_request_authorized:
+            security = self._evaluate_security(
+                call,
+                tool,
+                current_request_authorized=current_request_authorized,
+            )
+            if security is not None:
+                request, policy_decision = security
+                if policy_decision.action == "deny":
+                    yield ToolResultEvent(
+                        call.call_id,
+                        self._policy_denied_result(call, policy_decision),
+                    )
+                    index += 1
+                    continue
+                if policy_decision.action == "ask":
+                    request_id = context.open_tool_approval()
+                    yield self._approval_event(
+                        request_id,
+                        call,
+                        tool,
+                        policy_decision,
+                    )
+                    try:
+                        approval_result = await self._resolve_approval(
+                            context,
+                            request_id,
+                            request,
+                        )
+                    except AgentRunCancelled:
+                        for event in self._cancelled_events(
+                            tool_calls[index:]
+                        ):
+                            yield event
+                        return
+                    if approval_result is not None:
+                        yield ToolResultEvent(call.call_id, approval_result)
+                        index += 1
+                        continue
+            elif plan_only and not current_request_authorized:
                 request_id = context.open_tool_approval()
                 yield ToolApprovalRequestedEvent(
                     request_id=request_id,
@@ -170,6 +277,93 @@ class ToolScheduler:
             )
             yield ToolResultEvent(call.call_id, result)
             index += 1
+
+    def _evaluate_security(
+        self,
+        call: ToolCall,
+        tool: Tool,
+        *,
+        current_request_authorized: bool,
+    ) -> tuple[SecurityRequest, PolicyDecision] | None:
+        if self._policy_engine is None:
+            return None
+        try:
+            arguments = json.loads(call.arguments_json)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(arguments, dict):
+            return None
+        request = SecurityRequest(
+            call.call_id,
+            call.name,
+            tool.category,
+            arguments,
+            self._policy_engine.boundary.path_sandbox.working_directory,
+            current_request_authorized,
+        )
+        return request, self._policy_engine.evaluate(request)
+
+    async def _resolve_approval(
+        self,
+        context: AgentRunContext,
+        request_id: str,
+        request: SecurityRequest,
+    ) -> ToolResult | None:
+        decision = await context.wait_for_tool_approval(request_id)
+        if decision == "reject":
+            return ToolResult(
+                tool_name=request.tool_name,
+                success=False,
+                error_code="tool_denied_by_user",
+                error_message="工具调用被用户拒绝",
+            )
+        assert self._policy_engine is not None
+        if decision == "allow_session":
+            self._policy_engine.allow_for_session(request)
+        elif decision == "allow_permanent":
+            try:
+                await asyncio.to_thread(
+                    self._policy_engine.allow_permanently,
+                    request,
+                )
+            except (RuntimeError, OSError):
+                return ToolResult(
+                    tool_name=request.tool_name,
+                    success=False,
+                    error_code="security_persistence_failed",
+                    error_message="永久审批保存失败，工具未执行",
+                )
+        return None
+
+    @staticmethod
+    def _approval_event(
+        request_id: str,
+        call: ToolCall,
+        tool: Tool,
+        decision: PolicyDecision,
+    ) -> ToolApprovalRequestedEvent:
+        return ToolApprovalRequestedEvent(
+            request_id=request_id,
+            call_id=call.call_id,
+            tool_name=call.name,
+            arguments_json=call.arguments_json,
+            category=tool.category,
+            reason_code=decision.reason_code,
+        )
+
+    @staticmethod
+    def _policy_denied_result(
+        call: ToolCall,
+        decision: PolicyDecision,
+    ) -> ToolResult:
+        return ToolResult(
+            tool_name=call.name,
+            success=False,
+            error_code="tool_denied_by_policy",
+            error_message=(
+                "工具调用被安全策略拒绝: " f"{decision.reason_code}"
+            ),
+        )
 
     async def _execute_one(
         self,

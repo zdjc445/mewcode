@@ -345,7 +345,12 @@ async def test_app_renders_tool_start_and_result_events() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("button_id", "expected"),
-    [("#allow-once", "allow_once"), ("#reject-tool", "reject")],
+    [
+        ("#allow-once", "allow_once"),
+        ("#allow-session", "allow_session"),
+        ("#allow-permanent", "allow_permanent"),
+        ("#reject-tool", "reject"),
+    ],
 )
 async def test_tool_approval_card_resolves_context(
     button_id: str,

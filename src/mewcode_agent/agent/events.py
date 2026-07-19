@@ -15,7 +15,12 @@ AgentRunState: TypeAlias = Literal[
     "cancelled",
     "failed",
 ]
-ToolApprovalDecision: TypeAlias = Literal["allow_once", "reject"]
+ToolApprovalDecision: TypeAlias = Literal[
+    "allow_once",
+    "allow_session",
+    "allow_permanent",
+    "reject",
+]
 PlanApprovalDecision: TypeAlias = Literal[
     "execute_current",
     "request_changes",
@@ -52,6 +57,7 @@ class ToolApprovalRequestedEvent:
     tool_name: str
     arguments_json: str
     category: ToolCategory
+    reason_code: str = "approval_required"
 
 
 @dataclass(frozen=True, slots=True)

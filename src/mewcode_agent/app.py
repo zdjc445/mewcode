@@ -68,6 +68,7 @@ class ToolApprovalScreen(ModalScreen[ToolApprovalDecision | None]):
             yield Static("工具执行审批")
             yield Static(f"工具：{self._event.tool_name}")
             yield Static(f"类别：{self._event.category}")
+            yield Static(f"原因：{self._event.reason_code}")
             yield Static(f"参数：{self._event.arguments_json}")
             with Horizontal(id="tool-approval-actions"):
                 yield Button(
@@ -75,11 +76,29 @@ class ToolApprovalScreen(ModalScreen[ToolApprovalDecision | None]):
                     id="allow-once",
                     variant="warning",
                 )
+                yield Button(
+                    "本会话允许",
+                    id="allow-session",
+                    variant="primary",
+                )
+                yield Button(
+                    "永久允许",
+                    id="allow-permanent",
+                    variant="success",
+                )
                 yield Button("拒绝", id="reject-tool", variant="error")
 
     @on(Button.Pressed, "#allow-once")
     def allow_once(self) -> None:
         self.dismiss("allow_once")
+
+    @on(Button.Pressed, "#allow-session")
+    def allow_session(self) -> None:
+        self.dismiss("allow_session")
+
+    @on(Button.Pressed, "#allow-permanent")
+    def allow_permanent(self) -> None:
+        self.dismiss("allow_permanent")
 
     @on(Button.Pressed, "#reject-tool")
     def reject(self) -> None:

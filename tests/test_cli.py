@@ -46,6 +46,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
     run_calls: list[bool] = []
     agent_loop_calls: list[dict[str, object]] = []
@@ -58,6 +59,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
             *,
             prompt_runtime: object,
             prompt_composer: object,
+            scheduler: object,
         ) -> None:
             agent_loop_calls.append(
                 {
@@ -65,6 +67,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
                     "registry": registry,
                     "prompt_runtime": prompt_runtime,
                     "prompt_composer": prompt_composer,
+                    "scheduler": scheduler,
                 }
             )
 
@@ -77,6 +80,91 @@ def test_cli_builds_and_runs_app_with_valid_config(
     registry = agent_loop_calls[0]["registry"]
     assert isinstance(registry, ToolRegistry)
     assert registry.get("read_file") is not None
+    assert agent_loop_calls[0]["scheduler"] is not None
+
+
+def test_cli_reports_invalid_security_config(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+    capsys,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    home_path = tmp_path / "home"
+    security_path = home_path / ".mewcode-agent" / "security.yaml"
+    security_path.parent.mkdir(parents=True)
+    security_path.write_text(
+        "version: 1\nmode: unsafe\nrules: []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+
+    assert cli.main() == 1
+    error = capsys.readouterr().err
+    assert "启动失败：" in error
+    assert "mode 必须为 strict、default 或 permissive" in error
+
+
+def test_cli_loads_security_layers_and_injects_policy_scheduler(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    home_path = tmp_path / "home"
+    user_security = home_path / ".mewcode-agent" / "security.yaml"
+    project_security = tmp_path / ".mewcode" / "security.yaml"
+    user_security.parent.mkdir(parents=True)
+    project_security.parent.mkdir(parents=True)
+    user_security.write_text(
+        "version: 1\nmode: strict\nrules: []\n",
+        encoding="utf-8",
+    )
+    project_security.write_text(
+        """version: 1
+rules:
+  - id: project.allow_tests
+    action: allow
+    tool: run_command
+    priority: 10
+    match:
+      command:
+        kind: glob
+        pattern: "uv run pytest*"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+    calls: list[dict[str, object]] = []
+
+    class FakeAgentLoop:
+        def __init__(
+            self,
+            provider: object,
+            registry: ToolRegistry,
+            **kwargs: object,
+        ) -> None:
+            calls.append(
+                {"provider": provider, "registry": registry, **kwargs}
+            )
+
+    monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr(cli.ChatApp, "run", lambda self: None)
+
+    assert cli.main() == 0
+    scheduler = calls[0]["scheduler"]
+    policy = scheduler._policy_engine  # type: ignore[union-attr]
+    assert policy.mode == "strict"
 
 
 def test_cli_builds_prompt_dependencies_from_exact_two_layers(
@@ -133,6 +221,7 @@ def test_cli_builds_prompt_dependencies_from_exact_two_layers(
         "registry",
         "prompt_runtime",
         "prompt_composer",
+        "scheduler",
     }
     composer = calls[0]["prompt_composer"]
     frame = composer.compose([], ())  # type: ignore[union-attr]

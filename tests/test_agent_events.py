@@ -38,9 +38,10 @@ def test_approval_events_contain_ids_not_futures() -> None:
         "request_id",
         "call_id",
         "tool_name",
-        "arguments_json",
-        "category",
-    }
+            "arguments_json",
+            "category",
+            "reason_code",
+        }
     assert {field.name for field in fields(plan_event)} == {
         "request_id",
         "plan",

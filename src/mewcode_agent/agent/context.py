@@ -86,7 +86,12 @@ class AgentRunContext:
         request_id: str,
         decision: ToolApprovalDecision,
     ) -> None:
-        if decision not in ("allow_once", "reject"):
+        if decision not in (
+            "allow_once",
+            "allow_session",
+            "allow_permanent",
+            "reject",
+        ):
             raise ValueError("不支持的工具审批选择")
         future = self._pending_future(self._tool_approvals, request_id)
         future.set_result(decision)

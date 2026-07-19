@@ -19,6 +19,26 @@ async def test_tool_approval_is_resolved_exactly_once() -> None:
         context.resolve_tool_approval(request_id, "reject")
 
 
+@pytest.mark.parametrize(
+    "decision",
+    ["allow_once", "allow_session", "allow_permanent", "reject"],
+)
+@pytest.mark.asyncio
+async def test_tool_approval_accepts_each_valid_decision(
+    decision: str,
+) -> None:
+    context = AgentRunContext()
+    context.begin_run()
+    request_id = context.open_tool_approval()
+
+    context.resolve_tool_approval(
+        request_id,
+        decision,  # type: ignore[arg-type]
+    )
+
+    assert await context.wait_for_tool_approval(request_id) == decision
+
+
 @pytest.mark.asyncio
 async def test_plan_changes_require_non_blank_feedback() -> None:
     context = AgentRunContext()
