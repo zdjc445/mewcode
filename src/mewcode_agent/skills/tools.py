@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 from pathlib import Path
 import sys
@@ -23,6 +25,12 @@ from mewcode_agent.tools.base import (
 
 if TYPE_CHECKING:
     from mewcode_agent.skills.runtime import SkillRuntime
+
+
+_BOUND_SKILL_RUNTIME: ContextVar["SkillRuntime | None"] = ContextVar(
+    "mewcode_bound_skill_runtime",
+    default=None,
+)
 
 
 def _reject_json_constant(value: str) -> None:
@@ -149,13 +157,22 @@ class LoadSkillTool(Tool):
     def __init__(self, runtime: "SkillRuntime") -> None:
         self._runtime = runtime
 
+    @contextmanager
+    def bind_runtime(self, runtime: "SkillRuntime"):
+        token = _BOUND_SKILL_RUNTIME.set(runtime)
+        try:
+            yield
+        finally:
+            _BOUND_SKILL_RUNTIME.reset(token)
+
     async def execute(self, arguments: dict[str, Any]) -> Any:
         validate_arguments(
             arguments,
             required={"name": str, "arguments": str},
         )
         try:
-            return await self._runtime.load(
+            runtime = _BOUND_SKILL_RUNTIME.get() or self._runtime
+            return await runtime.load(
                 arguments["name"],
                 arguments["arguments"],
             )

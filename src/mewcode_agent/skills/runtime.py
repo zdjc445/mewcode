@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+import asyncio
 import hashlib
 import json
 from typing import Any
@@ -28,12 +29,15 @@ IsolatedSkillRunner = Callable[[SkillDefinition, str], Awaitable[Any]]
 class ActiveSkill:
     definition: SkillDefinition
     arguments: str
+    isolated_root: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.definition, SkillDefinition):
             raise ValueError("definition 类型无效")
         if not isinstance(self.arguments, str) or "\x00" in self.arguments:
             raise ValueError("arguments 无效")
+        if type(self.isolated_root) is not bool:
+            raise ValueError("isolated_root 必须是 bool")
 
 
 def _active_instruction_id(name: str) -> str:
@@ -51,6 +55,7 @@ class SkillRuntime:
         prompt_runtime: PromptRuntime,
         *,
         reserved_command_names: Iterable[str],
+        install_tools: bool = True,
     ) -> None:
         if not isinstance(catalog, SkillCatalog):
             raise ValueError("catalog 类型无效")
@@ -64,7 +69,9 @@ class SkillRuntime:
         self._reserved_command_names = frozenset(reserved_command_names)
         self._active: OrderedDict[str, ActiveSkill] = OrderedDict()
         self._isolated_runner: IsolatedSkillRunner | None = None
-        self._install_snapshot(catalog.snapshot)
+        self._operation_lock = asyncio.Lock()
+        if install_tools:
+            self._install_snapshot(catalog.snapshot)
         self._sync_controls()
 
     @property
@@ -110,6 +117,14 @@ class SkillRuntime:
             raise SkillConfigError("skill_not_found", "Skill 不存在")
         if not isinstance(arguments, str) or "\x00" in arguments:
             raise SkillConfigError("skill_activation_failed", "Skill arguments 无效")
+        async with self._operation_lock:
+            return await self._load_locked(name, arguments)
+
+    async def _load_locked(
+        self,
+        name: str,
+        arguments: str,
+    ) -> dict[str, Any]:
         prospective, refreshed = self._catalog.prepare_reload(
             name,
             existing_tool_names=frozenset(self._registry.non_skill_tool_names()),
@@ -129,13 +144,41 @@ class SkillRuntime:
                 "result": result,
             }
 
-        self._active[name] = ActiveSkill(refreshed, arguments)
+        self._active[name] = ActiveSkill(refreshed, arguments, False)
         self._sync_controls()
         return {
             "name": refreshed.name,
             "execution_mode": "shared",
             "active": True,
         }
+
+    def fork(self, prompt_runtime: PromptRuntime) -> SkillRuntime:
+        forked = SkillRuntime(
+            SkillCatalog(self._catalog.snapshot),
+            self._registry,
+            prompt_runtime,
+            reserved_command_names=self._reserved_command_names,
+            install_tools=False,
+        )
+        if self._isolated_runner is not None:
+            forked.set_isolated_runner(self._isolated_runner)
+        return forked
+
+    def prime_isolated(
+        self,
+        definition: SkillDefinition,
+        arguments: str,
+    ) -> None:
+        if definition.execution_mode != "isolated":
+            raise ValueError("definition 必须是 isolated Skill")
+        if not isinstance(arguments, str) or "\x00" in arguments:
+            raise ValueError("arguments 无效")
+        self._active[definition.name] = ActiveSkill(
+            definition,
+            arguments,
+            True,
+        )
+        self._sync_controls()
 
     def replace_catalog(self, snapshot: SkillCatalogSnapshot) -> None:
         if not isinstance(snapshot, SkillCatalogSnapshot):
@@ -145,10 +188,14 @@ class SkillRuntime:
         replacement_active: OrderedDict[str, ActiveSkill] = OrderedDict()
         for name, active in self._active.items():
             replacement = definitions.get(name)
-            if replacement is not None and replacement.execution_mode == "shared":
+            if replacement is not None and (
+                replacement.execution_mode == "shared"
+                or active.isolated_root
+            ):
                 replacement_active[name] = ActiveSkill(
                     replacement,
                     active.arguments,
+                    active.isolated_root,
                 )
         self._registry.replace_skill_tools(tools)
         self._catalog.replace(snapshot)

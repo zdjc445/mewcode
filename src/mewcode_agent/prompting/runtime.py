@@ -85,6 +85,19 @@ class PromptRuntime:
         self._validate_session_controls(session_controls)
         self._reset_timeline(session_controls)
 
+    def fork(
+        self,
+        *,
+        session_controls: tuple[RuntimeInstruction, ...] = (),
+    ) -> PromptRuntime:
+        """Create an independent timeline over the same environment sources."""
+
+        return PromptRuntime(
+            self._session_environment,
+            self._collector,
+            session_controls=session_controls,
+        )
+
     def replace_dynamic_session_controls(
         self,
         controls: tuple[RuntimeInstruction, ...],
