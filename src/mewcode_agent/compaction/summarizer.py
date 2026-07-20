@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 from typing import Any
@@ -94,6 +95,7 @@ class ContextSummarizer:
         history_start: int,
         history_end: int,
         messages: tuple[ChatMessage, ...],
+        on_usage: Callable[[ProviderUsageResult], None] | None = None,
     ) -> SummaryGeneration:
         if type(history_start) is not int or history_start < 0:
             raise ValueError("history_start 必须是非负整数")
@@ -159,6 +161,8 @@ class ContextSummarizer:
                         if usage_result is not None:
                             raise self._invalid("摘要 usage 事件重复")
                         usage_result = event.result
+                        if on_usage is not None:
+                            on_usage(usage_result)
                     elif isinstance(event, ProviderTurnEnd):
                         if usage_result is None:
                             raise self._invalid("摘要缺少 ProviderUsageEvent")

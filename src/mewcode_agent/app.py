@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, RichLog, Static, Switch
+from textual.worker import Worker
 
 from mewcode_agent.agent import (
     AgentEvent,
     AgentLoop,
     AgentRunContext,
+    ContextCompactionCompletedEvent,
+    ContextCompactionStartedEvent,
+    ContextCompactionWarningEvent,
     FinalResponseEvent,
     ModelTextEvent,
     ModelThinkingEvent,
@@ -26,6 +32,7 @@ from mewcode_agent.agent import (
     ToolResultEvent,
     UserMessageEvent,
 )
+from mewcode_agent.compaction import ContextCompactionError
 from mewcode_agent.history import ConversationHistory
 
 
@@ -264,6 +271,7 @@ class ChatApp(App[None]):
         self.active_response = ""
         self.active_thinking = ""
         self._active_context: AgentRunContext | None = None
+        self._active_compaction_worker: Worker[None] | None = None
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="chat-log", wrap=True, markup=False)
@@ -319,6 +327,14 @@ class ChatApp(App[None]):
             return
 
         plan_switch = self.query_one("#plan-only-switch", Switch)
+        if prompt == "/compact":
+            self._clear_active_output()
+            prompt_input.disabled = True
+            plan_switch.disabled = True
+            self._set_status("正在压缩上下文")
+            self._active_compaction_worker = self.compact_context()
+            return
+
         plan_only = plan_switch.value
         self._clear_active_output()
         prompt_input.disabled = True
@@ -350,6 +366,36 @@ class ChatApp(App[None]):
             plan_switch.disabled = False
             prompt_input.focus()
 
+    @work(exclusive=True, exit_on_error=False)
+    async def compact_context(self) -> None:
+        prompt_input = self.query_one("#prompt-input", Input)
+        plan_switch = self.query_one("#plan-only-switch", Switch)
+        try:
+            result = await self.agent_loop.compact_history(self.history)
+        except asyncio.CancelledError:
+            self._set_status("已取消：context_compaction_cancelled")
+            raise
+        except ContextCompactionError as exc:
+            self._set_status(f"压缩失败：{exc.message}（{exc.code}）")
+        except Exception:
+            self._set_status("压缩失败：上下文压缩发生未预期错误")
+        else:
+            if not result.changed:
+                self._set_status("没有可压缩的历史")
+            else:
+                reduction = result.estimate_before - result.estimate_after
+                self._set_status(
+                    "上下文压缩完成："
+                    f"generation={result.generation}，"
+                    f"覆盖消息={result.covered_history_end}，"
+                    f"估算减少={reduction}"
+                )
+        finally:
+            self._active_compaction_worker = None
+            prompt_input.disabled = False
+            plan_switch.disabled = False
+            prompt_input.focus()
+
     async def _handle_agent_event(
         self,
         event: AgentEvent,
@@ -364,6 +410,22 @@ class ChatApp(App[None]):
             self._set_status(
                 f"{mode}中（模型轮 {event.round_number}/{event.max_rounds}）"
             )
+        elif isinstance(event, ContextCompactionStartedEvent):
+            self._set_status(
+                "正在自动压缩上下文："
+                f"generation={event.generation}，"
+                f"覆盖消息={event.covered_messages}"
+            )
+        elif isinstance(event, ContextCompactionCompletedEvent):
+            reduction = event.estimate_before - event.estimate_after
+            self._set_status(
+                "自动上下文压缩完成："
+                f"generation={event.generation}，"
+                f"覆盖消息={event.covered_messages}，"
+                f"估算减少={reduction}"
+            )
+        elif isinstance(event, ContextCompactionWarningEvent):
+            self._set_status(f"上下文压缩警告：{event.error_code}")
         elif isinstance(event, ModelThinkingEvent):
             self.active_thinking += event.text
             self._render_transcript()
@@ -413,3 +475,5 @@ class ChatApp(App[None]):
     def action_cancel_run(self) -> None:
         if self._active_context is not None:
             self._active_context.cancel()
+        elif self._active_compaction_worker is not None:
+            self._active_compaction_worker.cancel()

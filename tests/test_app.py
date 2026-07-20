@@ -26,6 +26,7 @@ from mewcode_agent.agent import (
 from mewcode_agent.agent.context import AgentRunCancelled
 import mewcode_agent.app as app_module
 from mewcode_agent.app import ChatApp
+from mewcode_agent.compaction import ManualCompactionResult
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ChatMessage, ToolCall
 from mewcode_agent.tools.base import ToolResult
@@ -206,6 +207,37 @@ class GatedToolEventAgentLoop:
             context.finish_run()
 
 
+class ManualCompactionAgentLoop:
+    def __init__(self) -> None:
+        self.compact_calls = 0
+
+    async def compact_history(
+        self,
+        history: ConversationHistory,
+    ) -> ManualCompactionResult:
+        self.compact_calls += 1
+        assert len(history.snapshot()) == 1
+        return ManualCompactionResult(True, 2, 1, 900, 500)
+
+
+class GatedManualCompactionAgentLoop:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    async def compact_history(
+        self,
+        history: ConversationHistory,
+    ) -> ManualCompactionResult:
+        del history
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
 def make_app(
     loop: object,
     history: ConversationHistory | None = None,
@@ -290,6 +322,74 @@ async def test_app_ignores_blank_input() -> None:
         assert len(history) == 0
         assert prompt_input.disabled is False
         assert not loop.started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_exact_compact_command_does_not_enter_history() -> None:
+    loop = ManualCompactionAgentLoop()
+    history = ConversationHistory()
+    history.add_assistant("旧回复")
+    app = make_app(loop, history)
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "  /compact  "
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        status = str(app.query_one("#status", Static).render())
+        assert "generation=2" in status
+        assert "覆盖消息=1" in status
+        assert "估算减少=400" in status
+        assert prompt_input.disabled is False
+
+    assert loop.compact_calls == 1
+    assert history.snapshot() == [
+        ChatMessage(role="assistant", content="旧回复")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_exact_compact_text_is_an_ordinary_user_message() -> None:
+    loop = GatedAgentLoop()
+    history = ConversationHistory()
+    app = make_app(loop, history)
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "/Compact"
+        await pilot.press("enter")
+        await loop.started.wait()
+        loop.release.set()
+        await app.workers.wait_for_complete()
+
+    assert history.snapshot()[0] == ChatMessage(
+        role="user",
+        content="/Compact",
+    )
+
+
+@pytest.mark.asyncio
+async def test_escape_cancels_manual_compaction() -> None:
+    loop = GatedManualCompactionAgentLoop()
+    app = make_app(loop)
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "/compact"
+        await pilot.press("enter")
+        await loop.started.wait()
+        await pilot.press("escape")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert prompt_input.disabled is False
+        assert "context_compaction_cancelled" in str(
+            app.query_one("#status", Static).render()
+        )
+
+    assert loop.cancelled is True
 
 
 @pytest.mark.asyncio

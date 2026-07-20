@@ -8,6 +8,9 @@ from mewcode_agent.agent.events import (
     AgentEvent,
     AgentRunMode,
     AgentRunState,
+    ContextCompactionCompletedEvent,
+    ContextCompactionStartedEvent,
+    ContextCompactionWarningEvent,
     FinalResponseEvent,
     ModelTextEvent,
     ModelThinkingEvent,
@@ -28,7 +31,11 @@ from mewcode_agent.agent.tool_scheduler import (
     ToolScheduler,
     ToolSchedulerEvent,
 )
-from mewcode_agent.agent.usage import UsageCollector, UsageRecord
+from mewcode_agent.agent.usage import (
+    CompactionUsageRecord,
+    UsageCollector,
+    UsageRecord,
+)
 from mewcode_agent.agent.loop import AgentLoop, AgentLoopConfig
 
 __all__ = [
@@ -38,6 +45,10 @@ __all__ = [
     "AgentRunContext",
     "AgentRunMode",
     "AgentRunState",
+    "ContextCompactionCompletedEvent",
+    "ContextCompactionStartedEvent",
+    "ContextCompactionWarningEvent",
+    "CompactionUsageRecord",
     "FinalResponseEvent",
     "ModelTextEvent",
     "ModelThinkingEvent",

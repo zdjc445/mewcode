@@ -13,6 +13,9 @@ from mewcode_agent.agent.events import (
     AgentEvent,
     AgentRunMode,
     AgentRunState,
+    ContextCompactionCompletedEvent,
+    ContextCompactionStartedEvent,
+    ContextCompactionWarningEvent,
     FinalResponseEvent,
     ModelTextEvent,
     ModelThinkingEvent,
@@ -24,7 +27,17 @@ from mewcode_agent.agent.events import (
     UserMessageEvent,
 )
 from mewcode_agent.agent.tool_scheduler import ToolScheduler
-from mewcode_agent.agent.usage import UsageCollector, UsageRecord
+from mewcode_agent.agent.usage import (
+    CompactionUsageRecord,
+    UsageCollector,
+    UsageRecord,
+)
+from mewcode_agent.compaction import (
+    ContextCompactionError,
+    ContextPreparation,
+    ContextWindowManager,
+    ManualCompactionResult,
+)
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ThinkingBlock, ToolCall
 from mewcode_agent.prompting.builtins import PLAN_APPROVED_TEXT
@@ -74,6 +87,11 @@ class _ProviderFailure:
     error: Exception
 
 
+@dataclass(frozen=True, slots=True)
+class _ContextPreparationComplete:
+    preparation: ContextPreparation
+
+
 class _AgentLoopFailure(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -97,6 +115,7 @@ class AgentLoop:
         config: AgentLoopConfig | None = None,
         scheduler: ToolScheduler | None = None,
         usage_collector: UsageCollector | None = None,
+        context_window_manager: ContextWindowManager | None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -105,6 +124,52 @@ class AgentLoop:
         self._config = config or AgentLoopConfig()
         self._scheduler = scheduler or ToolScheduler(registry)
         self._usage_collector = usage_collector
+        self._context_window_manager = context_window_manager
+
+    async def compact_history(
+        self,
+        history: ConversationHistory,
+    ) -> ManualCompactionResult:
+        """Run one manual compaction without creating a Prompt request."""
+
+        manager = self._context_window_manager
+        if manager is None:
+            raise ContextCompactionError(
+                "context_summary_failed",
+                "当前 Agent 未配置上下文压缩",
+            )
+        try:
+            tools = tuple(self._registry.api_tools(self._provider.protocol))
+
+            def record_usage(
+                generation: int,
+                result: ProviderUsageResult,
+            ) -> None:
+                if self._usage_collector is not None:
+                    self._usage_collector.record(
+                        CompactionUsageRecord(
+                            self._provider.provider_id,
+                            generation,
+                            result,
+                        )
+                    )
+
+            return await manager.compact_now(
+                history,
+                compose_frame=lambda: self._prompt_composer.compose(
+                    history.snapshot(),
+                    self._prompt_runtime.timeline(),
+                ),
+                tools=tools,
+                on_summary_usage=record_usage,
+            )
+        except ContextCompactionError:
+            raise
+        except (ValueError, RuntimeError) as exc:
+            raise ContextCompactionError(
+                "context_summary_failed",
+                "无法生成上下文压缩请求",
+            ) from exc
 
     async def run(
         self,
@@ -171,10 +236,6 @@ class AgentLoop:
                         )
                         round_started = True
                         self._prompt_runtime.seal_round()
-                        frame = self._prompt_composer.compose(
-                            history.snapshot(),
-                            self._prompt_runtime.timeline(),
-                        )
                         api_tools = (
                             None
                             if is_final_round
@@ -182,15 +243,50 @@ class AgentLoop:
                                 self._provider.protocol
                             )
                         )
-                        provider_request = ProviderRequest(
-                            frame.system_prompt,
-                            frame.items,
-                            (
-                                tuple(api_tools)
-                                if api_tools is not None
-                                else None
-                            ),
+                        tools = (
+                            tuple(api_tools)
+                            if api_tools is not None
+                            else None
                         )
+                        manager = self._context_window_manager
+                        if manager is None:
+                            frame = self._prompt_composer.compose(
+                                history.snapshot(),
+                                self._prompt_runtime.timeline(),
+                            )
+                            provider_request = ProviderRequest(
+                                frame.system_prompt,
+                                frame.items,
+                                tools,
+                            )
+                        else:
+                            provider_request = None
+                            async for context_event in (
+                                self._prepare_context_request(
+                                    manager,
+                                    history,
+                                    tools=tools,
+                                    context=context,
+                                )
+                            ):
+                                if isinstance(
+                                    context_event,
+                                    _ContextPreparationComplete,
+                                ):
+                                    provider_request = (
+                                        context_event.preparation.request
+                                    )
+                                else:
+                                    yield context_event
+                            assert provider_request is not None
+                    except AgentRunCancelled:
+                        state = "cancelled"
+                        yield RunCancelledEvent("user_cancelled")
+                        return
+                    except ContextCompactionError as exc:
+                        state = "failed"
+                        yield RunErrorEvent(exc.code, exc.message)
+                        return
                     except (ValueError, RuntimeError):
                         state = "failed"
                         yield RunErrorEvent(
@@ -250,6 +346,13 @@ class AgentLoop:
                                 mode,
                                 round_data.usage_result,
                             )
+                        )
+
+                    if self._context_window_manager is not None:
+                        assert round_data.usage_result is not None
+                        self._context_window_manager.record_usage(
+                            provider_request,
+                            round_data.usage_result,
                         )
 
                     turn_end = round_data.turn_end
@@ -408,6 +511,137 @@ class AgentLoop:
             if request_started:
                 self._prompt_runtime.end_request()
             context.finish_run()
+
+    async def _prepare_context_request(
+        self,
+        manager: ContextWindowManager,
+        history: ConversationHistory,
+        *,
+        tools: tuple[dict[str, Any], ...] | None,
+        context: AgentRunContext,
+    ) -> AsyncIterator[AgentEvent | _ContextPreparationComplete]:
+        started_events: asyncio.Queue[ContextCompactionStartedEvent] = (
+            asyncio.Queue()
+        )
+        summary_attempt: tuple[int, int] | None = None
+
+        def on_summary_start(
+            generation: int,
+            covered_messages: int,
+            estimate_before: int,
+        ) -> None:
+            nonlocal summary_attempt
+            summary_attempt = (generation, covered_messages)
+            started_events.put_nowait(
+                ContextCompactionStartedEvent(
+                    generation,
+                    covered_messages,
+                    estimate_before,
+                )
+            )
+
+        def on_summary_usage(
+            generation: int,
+            result: ProviderUsageResult,
+        ) -> None:
+            if self._usage_collector is not None:
+                self._usage_collector.record(
+                    CompactionUsageRecord(
+                        self._provider.provider_id,
+                        generation,
+                        result,
+                    )
+                )
+
+        preparation_task = asyncio.create_task(
+            manager.prepare_agent_request(
+                history,
+                compose_frame=lambda: self._prompt_composer.compose(
+                    history.snapshot(),
+                    self._prompt_runtime.timeline(),
+                ),
+                tools=tools,
+                active_request_sequence=(
+                    self._prompt_runtime.active_request_sequence
+                ),
+                active_round_number=(
+                    self._prompt_runtime.active_round_number
+                ),
+                on_summary_start=on_summary_start,
+                on_summary_usage=on_summary_usage,
+            )
+        )
+        cancel_task = asyncio.create_task(context.wait_cancelled())
+        try:
+            while True:
+                started_task = asyncio.create_task(started_events.get())
+                done, _ = await asyncio.wait(
+                    {preparation_task, cancel_task, started_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if cancel_task in done:
+                    started_task.cancel()
+                    preparation_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await started_task
+                    with suppress(asyncio.CancelledError):
+                        await preparation_task
+                    raise AgentRunCancelled
+                if started_task in done:
+                    yield started_task.result()
+                else:
+                    started_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await started_task
+                if preparation_task not in done:
+                    continue
+
+                preparation = preparation_task.result()
+                while not started_events.empty():
+                    yield started_events.get_nowait()
+                checkpoint = manager.checkpoint
+                if preparation.checkpoint_changed:
+                    assert checkpoint is not None
+                    yield ContextCompactionCompletedEvent(
+                        checkpoint.generation,
+                        checkpoint.covered_history_end,
+                        preparation.estimate_before,
+                        preparation.estimate_after,
+                    )
+                if preparation.warning_code is not None:
+                    warning_generation = (
+                        summary_attempt[0]
+                        if summary_attempt is not None
+                        else (
+                            checkpoint.generation
+                            if checkpoint is not None
+                            else 0
+                        )
+                    )
+                    warning_coverage = (
+                        summary_attempt[1]
+                        if summary_attempt is not None
+                        else (
+                            checkpoint.covered_history_end
+                            if checkpoint is not None
+                            else 0
+                        )
+                    )
+                    yield ContextCompactionWarningEvent(
+                        preparation.warning_code,
+                        warning_generation,
+                        warning_coverage,
+                        preparation.estimate_before,
+                        preparation.estimate_after,
+                    )
+                yield _ContextPreparationComplete(preparation)
+                return
+        finally:
+            cancel_task.cancel()
+            if not preparation_task.done():
+                preparation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await preparation_task
 
     async def _consume_provider_round(
         self,

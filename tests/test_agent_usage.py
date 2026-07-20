@@ -1,5 +1,5 @@
 from mewcode_agent.agent.events import AgentEvent
-from mewcode_agent.agent.usage import UsageRecord
+from mewcode_agent.agent.usage import CompactionUsageRecord, UsageRecord
 from mewcode_agent.providers.base import ProviderUsage, ProviderUsageResult
 
 
@@ -24,3 +24,27 @@ def test_usage_record_contains_only_report_metadata() -> None:
         "result",
     )
     assert not isinstance(record, AgentEvent)
+
+
+def test_compaction_usage_record_has_separate_request_kind() -> None:
+    result = ProviderUsageResult(
+        "available",
+        ProviderUsage(10, 8, 2, 1),
+        None,
+    )
+    record = CompactionUsageRecord(
+        provider_id="deepseek_openai",
+        generation=2,
+        result=result,
+    )
+
+    assert record.request_kind == "compaction"
+    assert record.generation == 2
+    assert not hasattr(record, "request_sequence")
+    assert UsageRecord(
+        "deepseek_openai",
+        1,
+        1,
+        "executing",
+        result,
+    ).request_kind == "agent"

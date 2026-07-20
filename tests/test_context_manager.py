@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 from mewcode_agent.compaction import (
     CompactionConfig,
     ContextCompactionError,
+    ContextEstimate,
     ContextPreparation,
     ContextWindowManager,
     SummaryGeneration,
@@ -73,6 +75,7 @@ class StubSummarizer:
         history_start: int,
         history_end: int,
         messages: tuple[ChatMessage, ...],
+        on_usage: Callable[[ProviderUsageResult], None] | None = None,
     ) -> SummaryGeneration:
         self.calls.append((history_start, history_end))
         if self.fail:
@@ -80,7 +83,7 @@ class StubSummarizer:
                 "context_summary_failed",
                 "测试摘要失败",
             )
-        return SummaryGeneration(
+        result = SummaryGeneration(
             SummarySections(
                 primary_requests=("保留请求",),
                 key_concepts=(),
@@ -93,6 +96,30 @@ class StubSummarizer:
             ),
             ProviderUsageResult("unavailable", None, "test"),
         )
+        if on_usage is not None:
+            on_usage(result.usage_result)
+        return result
+
+
+class SequencedEstimator:
+    def __init__(self, values: tuple[int, ...]) -> None:
+        self._values = list(values)
+
+    def estimate(
+        self,
+        provider: object,
+        request: ProviderRequest,
+    ) -> ContextEstimate:
+        del provider, request
+        return ContextEstimate(self._values.pop(0), False)
+
+    def record_usage(
+        self,
+        provider: object,
+        request: ProviderRequest,
+        result: ProviderUsageResult,
+    ) -> None:
+        del provider, request, result
 
 
 def manager_config() -> CompactionConfig:
@@ -167,6 +194,40 @@ async def test_manager_runs_layer_one_then_commits_summary_projection() -> None:
         isinstance(item, ChatMessage) and item.role == "assistant"
         for item in prepared.request.items
     )
+
+
+@pytest.mark.asyncio
+async def test_manager_attempts_auto_summary_once_per_request() -> None:
+    history = ConversationHistory()
+    history.add_assistant("旧回复")
+    summarizer = StubSummarizer()
+    manager = ContextWindowManager(
+        MeasureProvider(),  # type: ignore[arg-type]
+        StubToolCompactor(),  # type: ignore[arg-type]
+        summarizer,  # type: ignore[arg-type]
+        context_window_tokens=110,
+        max_tokens=10,
+        estimator=SequencedEstimator((80, 50, 50, 80)),  # type: ignore[arg-type]
+    )
+
+    first = await manager.prepare_agent_request(
+        history,
+        compose_frame=frame_factory(history),
+        tools=None,
+        active_request_sequence=1,
+        active_round_number=1,
+    )
+    second = await manager.prepare_agent_request(
+        history,
+        compose_frame=frame_factory(history),
+        tools=None,
+        active_request_sequence=1,
+        active_round_number=2,
+    )
+
+    assert first.checkpoint_changed is True
+    assert second.checkpoint_changed is False
+    assert summarizer.calls == [(0, 1)]
 
 
 @pytest.mark.asyncio

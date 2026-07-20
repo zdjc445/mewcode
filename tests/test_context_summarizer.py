@@ -82,12 +82,14 @@ async def test_summarizer_uses_exact_tool_free_prompt_and_discards_draft() -> No
         timeout_seconds=1,
     )
     message = ChatMessage(role="user", content="原始请求\n保持空格  ")
+    usage_results: list[ProviderUsageResult] = []
 
     result = await summarizer.summarize(
         previous=None,
         history_start=0,
         history_end=1,
         messages=(message,),
+        on_usage=usage_results.append,
     )
 
     request = provider.requests[0]
@@ -101,6 +103,7 @@ async def test_summarizer_uses_exact_tool_free_prompt_and_discards_draft() -> No
     assert source["messages"][0]["content"] == message.content
     assert result.sections.primary_requests == ("实现压缩",)
     assert not hasattr(result, "analysis_draft")
+    assert usage_results == [unavailable_usage().result]
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,9 @@ from mewcode_agent.providers.base import (
     ProviderUsageResult,
 )
 
+ContextSummaryStartHandler = Callable[[int, int, int], None]
+ContextSummaryUsageHandler = Callable[[int, ProviderUsageResult], None]
+
 
 CONTEXT_BOUNDARY_TEXT = (
     "上下文压缩边界：此前部分 assistant 与 tool 细节已经由结构化摘要替代。"
@@ -252,6 +255,7 @@ class ContextWindowManager:
         self._consecutive_summary_failures = 0
         self._auto_compaction_disabled = False
         self._auto_warning_emitted = False
+        self._last_auto_attempt_request_sequence: int | None = None
         self._summary_lock = asyncio.Lock()
 
     @property
@@ -292,6 +296,8 @@ class ContextWindowManager:
         tools: tuple[dict[str, Any], ...] | None,
         active_request_sequence: int | None,
         active_round_number: int | None,
+        on_summary_start: ContextSummaryStartHandler | None = None,
+        on_summary_usage: ContextSummaryUsageHandler | None = None,
     ) -> ContextPreparation:
         await self.compact_tool_results(history)
         frame = compose_frame()
@@ -331,8 +337,28 @@ class ContextWindowManager:
                 False,
                 warning,
             )
+        if (
+            active_request_sequence is not None
+            and self._last_auto_attempt_request_sequence
+            == active_request_sequence
+        ):
+            if before.estimated_prompt_tokens >= self._prompt_budget_tokens:
+                raise ContextCompactionError(
+                    "context_window_exceeded",
+                    "上下文超过模型 Prompt 预算且本请求已尝试自动压缩",
+                )
+            return ContextPreparation(
+                request,
+                before.estimated_prompt_tokens,
+                before.estimated_prompt_tokens,
+                False,
+            )
 
         async with self._summary_lock:
+            if active_request_sequence is not None:
+                self._last_auto_attempt_request_sequence = (
+                    active_request_sequence
+                )
             try:
                 boundary = self._automatic_boundary(
                     history,
@@ -341,6 +367,17 @@ class ContextWindowManager:
                     active_request_sequence=active_request_sequence,
                     active_round_number=active_round_number,
                 )
+                if on_summary_start is not None:
+                    generation = (
+                        self._checkpoint.generation + 1
+                        if self._checkpoint is not None
+                        else 1
+                    )
+                    on_summary_start(
+                        generation,
+                        boundary,
+                        before.estimated_prompt_tokens,
+                    )
                 preparation = await self._summarize_to_boundary(
                     history,
                     frame,
@@ -350,6 +387,7 @@ class ContextWindowManager:
                     active_round_number=active_round_number,
                     estimate_before=before,
                     require_target=True,
+                    on_summary_usage=on_summary_usage,
                 )
             except ContextCompactionError as exc:
                 self._register_failure()
@@ -383,6 +421,7 @@ class ContextWindowManager:
         *,
         compose_frame: Callable[[], PromptFrame],
         tools: tuple[dict[str, Any], ...] | None,
+        on_summary_usage: ContextSummaryUsageHandler | None = None,
     ) -> ManualCompactionResult:
         await self.compact_tool_results(history)
         frame = compose_frame()
@@ -461,6 +500,7 @@ class ContextWindowManager:
                     active_round_number=None,
                     estimate_before=before,
                     require_target=require_target,
+                    on_summary_usage=on_summary_usage,
                 )
             except ContextCompactionError:
                 self._register_failure()
@@ -563,6 +603,7 @@ class ContextWindowManager:
         active_round_number: int | None,
         estimate_before: ContextEstimate,
         require_target: bool,
+        on_summary_usage: ContextSummaryUsageHandler | None,
     ) -> ContextPreparation:
         messages = history.snapshot()
         previous = self._checkpoint
@@ -577,6 +618,18 @@ class ContextWindowManager:
             history_start=history_start,
             history_end=boundary,
             messages=tuple(messages[history_start:boundary]),
+            on_usage=(
+                (
+                    lambda result: on_summary_usage(
+                        previous.generation + 1
+                        if previous is not None
+                        else 1,
+                        result,
+                    )
+                )
+                if on_summary_usage is not None
+                else None
+            ),
         )
         checkpoint = SummaryCheckpoint(
             previous.generation + 1 if previous is not None else 1,

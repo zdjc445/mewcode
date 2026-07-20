@@ -12,6 +12,9 @@ from mewcode_agent.agent import (
     AgentLoop,
     AgentLoopConfig,
     AgentRunContext,
+    CompactionUsageRecord,
+    ContextCompactionCompletedEvent,
+    ContextCompactionStartedEvent,
     FinalResponseEvent,
     ModelTextEvent,
     ModelThinkingEvent,
@@ -26,6 +29,14 @@ from mewcode_agent.agent import (
     UsageRecord,
     UserMessageEvent,
 )
+from mewcode_agent.compaction import (
+    SUMMARY_SYSTEM_PROMPT,
+    CompactionConfig,
+    ContextEstimate,
+    ContextSummarizer,
+    ContextWindowManager,
+    ToolCompactionResult,
+)
 from mewcode_agent.prompting.builtins import BUILTIN_MODULES
 from mewcode_agent.prompting.composer import PromptComposer
 from mewcode_agent.prompting.environment import (
@@ -33,7 +44,11 @@ from mewcode_agent.prompting.environment import (
     RequestEnvironment,
     SessionEnvironment,
 )
-from mewcode_agent.prompting.models import ControlMessage, RuntimeInstruction
+from mewcode_agent.prompting.models import (
+    ContextSummaryMessage,
+    ControlMessage,
+    RuntimeInstruction,
+)
 from mewcode_agent.prompting.runtime import PromptRuntime
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
@@ -134,6 +149,101 @@ class SlowProvider:
         yield ProviderTurnEnd("end_turn")
 
 
+class FixedCompactionEstimator:
+    def __init__(self) -> None:
+        self.recorded: list[ProviderUsageResult] = []
+
+    def estimate(
+        self,
+        provider: LLMProvider,
+        request: ProviderRequest,
+    ) -> ContextEstimate:
+        del provider
+        compressed = any(
+            isinstance(item, ContextSummaryMessage)
+            for item in request.items
+        )
+        return ContextEstimate(50 if compressed else 80, False)
+
+    def record_usage(
+        self,
+        provider: LLMProvider,
+        request: ProviderRequest,
+        result: ProviderUsageResult,
+    ) -> None:
+        del provider, request
+        self.recorded.append(result)
+
+
+class RecordingToolCompactor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def compact(
+        self,
+        history: ConversationHistory,
+    ) -> ToolCompactionResult:
+        del history
+        self.calls += 1
+        return ToolCompactionResult(0, 0, 0, 0)
+
+
+class IntegratedCompactionProvider:
+    provider_id = "test_provider"
+    protocol: ProviderProtocol = "openai"
+
+    def __init__(self, *, block_summary: bool = False) -> None:
+        self.block_summary = block_summary
+        self.summary_started = asyncio.Event()
+        self.summary_cancelled = False
+        self.requests: list[ProviderRequest] = []
+
+    def prompt_payload(self, request: ProviderRequest) -> dict[str, Any]:
+        return {
+            "system": request.system_prompt,
+            "items": [str(item) for item in request.items],
+            "tools": request.tools,
+        }
+
+    async def stream_chat(
+        self,
+        request: ProviderRequest,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        self.requests.append(request)
+        if request.system_prompt == SUMMARY_SYSTEM_PROMPT:
+            self.summary_started.set()
+            if self.block_summary:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.summary_cancelled = True
+                    raise
+            yield ProviderTextDelta(
+                json.dumps(
+                    {
+                        "analysis_draft": ["覆盖旧回复"],
+                        "summary": {
+                            "primary_requests": [],
+                            "key_concepts": [],
+                            "files_and_code": [],
+                            "errors_and_fixes": [],
+                            "solution_process": ["旧回复"],
+                            "pending_tasks": [],
+                            "current_work": [],
+                            "next_step": [],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            yield ProviderUsageEvent(ZERO_USAGE_RESULT)
+            yield ProviderTurnEnd("end_turn")
+            return
+        yield ProviderTextDelta("完成")
+        yield ProviderUsageEvent(ZERO_USAGE_RESULT)
+        yield ProviderTurnEnd("end_turn")
+
+
 class EchoReadTool(Tool):
     name = "echo_read"
     description = "Return the input value"
@@ -215,14 +325,49 @@ def make_loop(
         prompt_composer=composer,
         config=config,
         usage_collector=usage_collector,
+        context_window_manager=None,
+    )
+
+
+def make_integrated_compaction_loop(
+    provider: IntegratedCompactionProvider,
+    *,
+    usage_collector: UsageCollector | None = None,
+) -> tuple[AgentLoop, ContextWindowManager, FixedCompactionEstimator]:
+    runtime, composer = make_prompt_dependencies()
+    registry = make_registry()
+    estimator = FixedCompactionEstimator()
+    manager = ContextWindowManager(
+        provider,
+        RecordingToolCompactor(),  # type: ignore[arg-type]
+        ContextSummarizer(provider, timeout_seconds=10),
+        context_window_tokens=110,
+        max_tokens=10,
+        estimator=estimator,  # type: ignore[arg-type]
+        config=CompactionConfig(),
+    )
+    return (
+        AgentLoop(
+            provider,
+            registry,
+            prompt_runtime=runtime,
+            prompt_composer=composer,
+            usage_collector=usage_collector,
+            context_window_manager=manager,
+        ),
+        manager,
+        estimator,
     )
 
 
 class RecordingUsageCollector:
     def __init__(self) -> None:
-        self.records: list[UsageRecord] = []
+        self.records: list[UsageRecord | CompactionUsageRecord] = []
 
-    def record(self, record: UsageRecord) -> None:
+    def record(
+        self,
+        record: UsageRecord | CompactionUsageRecord,
+    ) -> None:
         self.records.append(record)
 
 
@@ -314,6 +459,76 @@ def terminal_events(events: list[AgentEvent]) -> list[AgentEvent]:
             (FinalResponseEvent, RunErrorEvent, RunCancelledEvent),
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_prepares_compaction_and_records_primary_usage() -> None:
+    provider = IntegratedCompactionProvider()
+    collector = RecordingUsageCollector()
+    loop, manager, estimator = make_integrated_compaction_loop(
+        provider,
+        usage_collector=collector,
+    )
+    history = ConversationHistory()
+    history.add_assistant("旧回复")
+
+    events = await collect_run(loop, "新任务", history)
+
+    started = next(
+        event
+        for event in events
+        if isinstance(event, ContextCompactionStartedEvent)
+    )
+    completed = next(
+        event
+        for event in events
+        if isinstance(event, ContextCompactionCompletedEvent)
+    )
+    assert started.generation == 1
+    assert started.covered_messages == 1
+    assert completed == ContextCompactionCompletedEvent(1, 1, 80, 50)
+    assert manager.checkpoint is not None
+    assert len(provider.requests) == 2
+    assert provider.requests[0].tools is None
+    assert any(
+        isinstance(item, ContextSummaryMessage)
+        for item in provider.requests[1].items
+    )
+    assert estimator.recorded == [ZERO_USAGE_RESULT]
+    assert [record.request_kind for record in collector.records] == [
+        "compaction",
+        "agent",
+    ]
+    assert events[-1] == FinalResponseEvent("完成", 1)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_cancels_inflight_automatic_summary_transaction() -> None:
+    provider = IntegratedCompactionProvider(block_summary=True)
+    loop, manager, _ = make_integrated_compaction_loop(provider)
+    history = ConversationHistory()
+    history.add_assistant("旧回复")
+    context = AgentRunContext()
+
+    events: list[AgentEvent] = []
+    async for event in loop.run(
+        "新任务",
+        history,
+        plan_only=False,
+        context=context,
+    ):
+        events.append(event)
+        if isinstance(event, ContextCompactionStartedEvent):
+            context.cancel()
+
+    assert any(
+        isinstance(event, ContextCompactionStartedEvent)
+        for event in events
+    )
+    assert events[-1] == RunCancelledEvent("user_cancelled")
+    assert provider.summary_cancelled is True
+    assert manager.checkpoint is None
+    assert len(provider.requests) == 1
 
 
 @pytest.mark.parametrize(
@@ -450,6 +665,7 @@ async def test_prompt_compose_failure_is_sanitized() -> None:
         make_registry(),
         prompt_runtime=runtime,
         prompt_composer=ExplodingComposer(),  # type: ignore[arg-type]
+        context_window_manager=None,
     )
 
     events = await collect_run(
@@ -501,6 +717,7 @@ async def test_provider_failure_cleans_request_for_next_run() -> None:
         make_registry(),
         prompt_runtime=runtime,
         prompt_composer=composer,
+        context_window_manager=None,
     )
     history = ConversationHistory()
 
@@ -528,6 +745,7 @@ async def test_cancelled_request_cleans_runtime_for_next_run() -> None:
         make_registry(),
         prompt_runtime=runtime,
         prompt_composer=composer,
+        context_window_manager=None,
     )
     history = ConversationHistory()
     cancelled_context = AgentRunContext()

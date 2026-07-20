@@ -6,8 +6,16 @@ import asyncio
 import sys
 from pathlib import Path
 
-from mewcode_agent.agent import AgentLoop, ToolScheduler
+from mewcode_agent.agent import AgentLoop, AgentLoopConfig, ToolScheduler
 from mewcode_agent.app import ChatApp
+from mewcode_agent.compaction import (
+    CompactionConfig,
+    ContextArtifactStore,
+    ContextCompactionError,
+    ContextSummarizer,
+    ContextWindowManager,
+    ToolResultCompactor,
+)
 from mewcode_agent.config import ConfigError, load_config
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.mcp import (
@@ -53,6 +61,7 @@ async def run_application() -> int:
     """Build and run one application session on the current event loop."""
 
     mcp_manager: McpConnectionManager | None = None
+    artifact_store: ContextArtifactStore | None = None
     try:
         session_environment = collect_session_environment()
         working_directory = Path(
@@ -100,8 +109,16 @@ async def run_application() -> int:
         )
         provider_config = config.active_provider
         provider = create_provider(provider_config, config.api_key)
+        compaction_config = CompactionConfig()
+        artifact_store = ContextArtifactStore(
+            root=user_config_directory / "context-artifacts",
+            config=compaction_config,
+        )
+        await artifact_store.cleanup_stale()
+        await artifact_store.initialize()
         registry = create_core_registry(
             working_directory=working_directory,
+            artifact_store=artifact_store,
         )
         mcp_configuration = load_mcp_config(
             working_directory=working_directory,
@@ -124,6 +141,22 @@ async def run_application() -> int:
             registry,
             policy_engine=security_policy,
         )
+        loop_config = AgentLoopConfig()
+        context_window_manager = ContextWindowManager(
+            provider,
+            ToolResultCompactor(
+                artifact_store,
+                config=compaction_config,
+            ),
+            ContextSummarizer(
+                provider,
+                timeout_seconds=loop_config.llm_timeout_seconds,
+                config=compaction_config,
+            ),
+            context_window_tokens=provider_config.context_window_tokens,
+            max_tokens=provider_config.max_tokens,
+            config=compaction_config,
+        )
     except (
         ConfigError,
         SecurityConfigError,
@@ -132,9 +165,14 @@ async def run_application() -> int:
         PathSandboxError,
         ProviderError,
         McpError,
+        ContextCompactionError,
     ) as exc:
-        if mcp_manager is not None:
-            await mcp_manager.close()
+        try:
+            if mcp_manager is not None:
+                await mcp_manager.close()
+        finally:
+            if artifact_store is not None:
+                await artifact_store.close()
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
     try:
@@ -144,6 +182,7 @@ async def run_application() -> int:
             prompt_runtime=prompt_runtime,
             prompt_composer=prompt_composer,
             scheduler=scheduler,
+            context_window_manager=context_window_manager,
         )
         app = ChatApp(
             agent_loop,
@@ -155,7 +194,11 @@ async def run_application() -> int:
         return 0
     finally:
         assert mcp_manager is not None
-        await mcp_manager.close()
+        assert artifact_store is not None
+        try:
+            await mcp_manager.close()
+        finally:
+            await artifact_store.close()
 
 
 def main() -> int:

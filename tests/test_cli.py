@@ -61,17 +61,19 @@ def test_cli_builds_and_runs_app_with_valid_config(
             provider: object,
             registry: ToolRegistry,
             *,
-            prompt_runtime: object,
-            prompt_composer: object,
-            scheduler: object,
+                prompt_runtime: object,
+                prompt_composer: object,
+                scheduler: object,
+                context_window_manager: object,
         ) -> None:
             agent_loop_calls.append(
                 {
                     "provider": provider,
                     "registry": registry,
                     "prompt_runtime": prompt_runtime,
-                    "prompt_composer": prompt_composer,
-                    "scheduler": scheduler,
+                        "prompt_composer": prompt_composer,
+                        "scheduler": scheduler,
+                        "context_window_manager": context_window_manager,
                 }
             )
 
@@ -87,7 +89,9 @@ def test_cli_builds_and_runs_app_with_valid_config(
     registry = agent_loop_calls[0]["registry"]
     assert isinstance(registry, ToolRegistry)
     assert registry.get("read_file") is not None
+    assert registry.get("read_context_artifact") is not None
     assert agent_loop_calls[0]["scheduler"] is not None
+    assert agent_loop_calls[0]["context_window_manager"] is not None
 
 
 def test_cli_reports_invalid_security_config(
@@ -233,9 +237,10 @@ def test_cli_builds_prompt_dependencies_from_exact_two_layers(
         "provider",
         "registry",
         "prompt_runtime",
-        "prompt_composer",
-        "scheduler",
-    }
+            "prompt_composer",
+            "scheduler",
+            "context_window_manager",
+        }
     composer = calls[0]["prompt_composer"]
     frame = composer.compose([], ())  # type: ignore[union-attr]
     assert "## coding.team\nproject team" in frame.system_prompt

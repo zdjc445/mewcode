@@ -41,6 +41,30 @@ class RoundStartedEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextCompactionStartedEvent:
+    generation: int
+    covered_messages: int
+    estimate_before: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContextCompactionCompletedEvent:
+    generation: int
+    covered_messages: int
+    estimate_before: int
+    estimate_after: int
+
+
+@dataclass(frozen=True, slots=True)
+class ContextCompactionWarningEvent:
+    error_code: str
+    generation: int
+    covered_messages: int
+    estimate_before: int
+    estimate_after: int
+
+
+@dataclass(frozen=True, slots=True)
 class ModelThinkingEvent:
     text: str
 
@@ -102,6 +126,9 @@ class RunCancelledEvent:
 AgentEvent: TypeAlias = (
     UserMessageEvent
     | RoundStartedEvent
+    | ContextCompactionStartedEvent
+    | ContextCompactionCompletedEvent
+    | ContextCompactionWarningEvent
     | ModelThinkingEvent
     | ModelTextEvent
     | ToolApprovalRequestedEvent
