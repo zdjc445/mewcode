@@ -64,6 +64,41 @@ def _json_mapping(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _read_json(path: Path, label: str) -> Any:
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_json_mapping,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise _state_error(f"无法读取 {label}", exc)
+
+
+def read_worktree_state_main_root(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise _state_error("Worktree 状态路径不是文件")
+    raw = _read_json(path, "Worktree 状态")
+    data = _exact_mapping(raw, _STATE_KEYS, "Worktree 状态")
+    if type(data["version"]) is not int or data["version"] != 1:
+        raise _state_error("Worktree 状态 version 必须是整数 1")
+    if not isinstance(data["main_root"], str):
+        raise _state_error("Worktree 状态 main_root 无效")
+    try:
+        main_root = Path(data["main_root"])
+        normalized = main_root.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _state_error("Worktree 状态 main_root 无效", exc)
+    if (
+        not main_root.is_absolute()
+        or main_root != normalized
+        or not normalized.is_dir()
+    ):
+        raise _state_error("Worktree 状态 main_root 无效")
+    return normalized
+
+
 def load_worktree_state(
     path: Path,
     *,
@@ -77,12 +112,9 @@ def load_worktree_state(
     if not path.is_file():
         raise _state_error("Worktree 状态路径不是文件")
     try:
-        raw = json.loads(
-            path.read_text(encoding="utf-8"),
-            object_pairs_hook=_json_mapping,
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-        raise _state_error("无法读取 Worktree 状态", exc)
+        raw = _read_json(path, "Worktree 状态")
+    except WorktreeError:
+        raise
     data = _exact_mapping(raw, _STATE_KEYS, "Worktree 状态")
     if type(data["version"]) is not int or data["version"] != 1:
         raise _state_error("Worktree 状态 version 必须是整数 1")

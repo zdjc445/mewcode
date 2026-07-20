@@ -114,6 +114,12 @@ def validate_object_id(value: str) -> str:
     return value
 
 
+def validate_task_id(value: str) -> str:
+    if not isinstance(value, str) or _TASK_ID.fullmatch(value) is None:
+        raise ValueError("Worker task ID 无效")
+    return value
+
+
 def _validate_time(value: str, field_name: str) -> datetime:
     if not isinstance(value, str):
         raise ValueError(f"{field_name} 无效")
@@ -292,3 +298,18 @@ class WorktreeCreateResult:
 @dataclass(frozen=True, slots=True)
 class WorktreeCloseResult:
     cleanup_task_cancelled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WorktreeSwitchResult:
+    target: Path
+    active_name: str | None
+    restart_required: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, Path) or not self.target.is_absolute():
+            raise ValueError("switch target 必须是绝对 Path")
+        if self.active_name is not None:
+            validate_worktree_name(self.active_name)
+        if type(self.restart_required) is not bool:
+            raise ValueError("restart_required 必须是 bool")
