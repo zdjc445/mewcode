@@ -210,7 +210,7 @@ script
 
 ### 6.2 工具字段
 
-- `name` 必须满足现有 Provider 工具名约束，并在全局工具注册中心唯一；不得以保留前缀 `mcp_` 开始，不得等于 `load_skill`；
+- `name` 必须完整匹配 `[a-z][a-z0-9_]{0,63}`，并在全局工具注册中心唯一；不得以保留前缀 `mcp_` 开始，不得等于 `load_skill`；
 - `description` 必须是非空单行字符串；
 - `parameters` 必须是合法 JSON Schema object，并通过现有 `jsonschema` 校验器检查 schema 本身；
 - `category` 本章必须精确为 `command`；
