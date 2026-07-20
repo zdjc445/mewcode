@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
+from mewcode_agent.compaction.artifacts import ContextArtifactStore
+
 from mewcode_agent.security.boundary import SecurityBoundary
 from mewcode_agent.security.models import SecurityRequest
 from mewcode_agent.security.path_sandbox import PathSandbox, PathSandboxError
@@ -16,6 +18,7 @@ from mewcode_agent.tools.edit_file import EditFileTool
 from mewcode_agent.tools.file_state_cache import FileStateCache
 from mewcode_agent.tools.find_files import FindFilesTool
 from mewcode_agent.tools.read_file import ReadFileTool
+from mewcode_agent.tools.read_context_artifact import ReadContextArtifactTool
 from mewcode_agent.tools.run_command import RunCommandTool
 from mewcode_agent.tools.search_code import SearchCodeTool
 from mewcode_agent.tools.write_file import WriteFileTool
@@ -232,6 +235,7 @@ class ToolRegistry:
 def create_core_registry(
     *,
     working_directory: Path | None = None,
+    artifact_store: ContextArtifactStore | None = None,
 ) -> ToolRegistry:
     path_sandbox = PathSandbox(working_directory or Path.cwd())
     security_boundary = SecurityBoundary(path_sandbox)
@@ -247,4 +251,6 @@ def create_core_registry(
     )
     for tool in tools:
         registry.register(tool)
+    if artifact_store is not None:
+        registry.register(ReadContextArtifactTool(artifact_store))
     return registry

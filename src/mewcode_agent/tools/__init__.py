@@ -10,6 +10,7 @@ from mewcode_agent.tools.edit_file import EditFileTool
 from mewcode_agent.tools.file_state_cache import FileStateCache
 from mewcode_agent.tools.find_files import FindFilesTool
 from mewcode_agent.tools.read_file import ReadFileTool
+from mewcode_agent.tools.read_context_artifact import ReadContextArtifactTool
 from mewcode_agent.tools.registry import ToolRegistry, create_core_registry
 from mewcode_agent.tools.run_command import RunCommandTool
 from mewcode_agent.tools.search_code import SearchCodeTool
@@ -20,6 +21,7 @@ __all__ = [
     "FileStateCache",
     "FindFilesTool",
     "ReadFileTool",
+    "ReadContextArtifactTool",
     "RunCommandTool",
     "SearchCodeTool",
     "Tool",

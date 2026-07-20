@@ -16,6 +16,7 @@ def openai_config() -> ProviderConfig:
         api_key_env="DEEPSEEK_API_KEY",
         model="deepseek-v4-pro",
         max_tokens=4096,
+        context_window_tokens=1000000,
     )
 
 
@@ -28,6 +29,7 @@ def anthropic_config() -> ProviderConfig:
         api_key_env="DEEPSEEK_API_KEY",
         model="deepseek-v4-pro",
         max_tokens=4096,
+        context_window_tokens=1000000,
     )
 
 
@@ -43,6 +45,7 @@ providers:
     api_key_env: DEEPSEEK_API_KEY
     model: deepseek-v4-pro
     max_tokens: 4096
+    context_window_tokens: 1000000
 
   deepseek_anthropic:
     protocol: anthropic
@@ -50,6 +53,7 @@ providers:
     api_key_env: DEEPSEEK_API_KEY
     model: deepseek-v4-pro
     max_tokens: 4096
+    context_window_tokens: 1000000
 """
 
 

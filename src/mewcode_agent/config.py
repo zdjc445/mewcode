@@ -13,7 +13,14 @@ import yaml
 ProtocolName: TypeAlias = Literal["openai", "anthropic"]
 
 _TOP_LEVEL_KEYS = {"default_provider", "providers"}
-_PROVIDER_KEYS = {"protocol", "base_url", "api_key_env", "model", "max_tokens"}
+_PROVIDER_KEYS = {
+    "protocol",
+    "base_url",
+    "api_key_env",
+    "model",
+    "max_tokens",
+    "context_window_tokens",
+}
 _EXPECTED_PROVIDERS: dict[str, dict[str, str | int]] = {
     "deepseek_openai": {
         "protocol": "openai",
@@ -21,6 +28,7 @@ _EXPECTED_PROVIDERS: dict[str, dict[str, str | int]] = {
         "api_key_env": "DEEPSEEK_API_KEY",
         "model": "deepseek-v4-pro",
         "max_tokens": 4096,
+        "context_window_tokens": 1000000,
     },
     "deepseek_anthropic": {
         "protocol": "anthropic",
@@ -28,6 +36,7 @@ _EXPECTED_PROVIDERS: dict[str, dict[str, str | int]] = {
         "api_key_env": "DEEPSEEK_API_KEY",
         "model": "deepseek-v4-pro",
         "max_tokens": 4096,
+        "context_window_tokens": 1000000,
     },
 }
 
@@ -44,6 +53,7 @@ class ProviderConfig:
     api_key_env: str
     model: str
     max_tokens: int
+    context_window_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,13 +91,20 @@ def _parse_provider(provider_id: str, raw: Any) -> ProviderConfig:
     expected = _EXPECTED_PROVIDERS[provider_id]
     for key, expected_value in expected.items():
         value = data[key]
-        if key == "max_tokens":
+        if key in ("max_tokens", "context_window_tokens"):
             if type(value) is not int:
-                raise ConfigError(f"{path}.max_tokens 必须是整数")
+                raise ConfigError(f"{path}.{key} 必须是整数")
         elif not isinstance(value, str):
             raise ConfigError(f"{path}.{key} 必须是字符串")
         if value != expected_value:
             raise ConfigError(f"{path}.{key} 必须为 {expected_value}")
+
+    max_tokens = cast(int, data["max_tokens"])
+    context_window_tokens = cast(int, data["context_window_tokens"])
+    if context_window_tokens <= max_tokens:
+        raise ConfigError(
+            f"{path}.context_window_tokens 必须大于 max_tokens"
+        )
 
     return ProviderConfig(
         provider_id=provider_id,
@@ -95,7 +112,8 @@ def _parse_provider(provider_id: str, raw: Any) -> ProviderConfig:
         base_url=cast(str, data["base_url"]),
         api_key_env=cast(str, data["api_key_env"]),
         model=cast(str, data["model"]),
-        max_tokens=cast(int, data["max_tokens"]),
+        max_tokens=max_tokens,
+        context_window_tokens=context_window_tokens,
     )
 
 

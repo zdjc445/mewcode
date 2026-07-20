@@ -26,6 +26,7 @@ def test_factory_rejects_unknown_protocol(openai_config: ProviderConfig) -> None
         api_key_env=openai_config.api_key_env,
         model=openai_config.model,
         max_tokens=openai_config.max_tokens,
+        context_window_tokens=openai_config.context_window_tokens,
     )
 
     with pytest.raises(ProviderError, match="不支持的协议: other"):

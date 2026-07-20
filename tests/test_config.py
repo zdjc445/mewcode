@@ -17,6 +17,7 @@ def test_load_valid_config(config_path: Path) -> None:
     assert config.active_provider.base_url == "https://api.deepseek.com"
     assert config.active_provider.model == "deepseek-v4-pro"
     assert config.active_provider.max_tokens == 4096
+    assert config.active_provider.context_window_tokens == 1000000
     assert config.api_key == "test-secret"
     assert "test-secret" not in repr(config)
 
@@ -113,6 +114,28 @@ def test_wrong_max_tokens_type_is_rejected(
         load_config(config_path, environ={"DEEPSEEK_API_KEY": "test-secret"})
 
 
+@pytest.mark.parametrize("value", ['"1000000"', "true"])
+def test_wrong_context_window_tokens_type_is_rejected(
+    config_path: Path,
+    valid_config_text: str,
+    value: str,
+) -> None:
+    config_path.write_text(
+        valid_config_text.replace(
+            "context_window_tokens: 1000000",
+            f"context_window_tokens: {value}",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="context_window_tokens 必须是整数",
+    ):
+        load_config(config_path, environ={"DEEPSEEK_API_KEY": "test-secret"})
+
+
 def test_missing_provider_is_rejected(
     config_path: Path,
     valid_config_text: str,
@@ -124,6 +147,7 @@ def test_missing_provider_is_rejected(
     api_key_env: DEEPSEEK_API_KEY
     model: deepseek-v4-pro
     max_tokens: 4096
+    context_window_tokens: 1000000
 """
     config_path.write_text(
         valid_config_text.replace(anthropic_block, ""),

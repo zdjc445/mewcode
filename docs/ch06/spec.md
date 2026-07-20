@@ -206,7 +206,7 @@ prompt_budget_tokens = context_window_tokens - max_tokens
 | --- | ---: |
 | 单个工具结果内联上限 | `64 KiB` UTF-8 bytes |
 | 单个工具批次内联合计上限 | `128 KiB` UTF-8 bytes |
-| 单个外置预览上限 | `8 KiB` UTF-8 bytes |
+| 单个外置预览正文截取预算 | `8 KiB` UTF-8 bytes，不含固定省略标记 |
 | 预览头部预算 | `6 KiB` UTF-8 bytes |
 | 预览尾部预算 | `2 KiB` UTF-8 bytes |
 | 单个 artifact 上限 | `64 MiB` UTF-8 bytes |

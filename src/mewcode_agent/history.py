@@ -1,9 +1,32 @@
 """In-memory conversation history."""
 
+from dataclasses import dataclass
+from hashlib import sha256
 import json
 
 from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
 from mewcode_agent.tools.base import ToolResult
+
+
+@dataclass(frozen=True, slots=True)
+class ToolMessageReplacement:
+    index: int
+    expected_tool_call_id: str
+    expected_content_sha256: str
+    message: ChatMessage
+
+    def __post_init__(self) -> None:
+        if type(self.index) is not int or self.index < 0:
+            raise ValueError("replacement index 必须是非负整数")
+        if not self.expected_tool_call_id:
+            raise ValueError("expected_tool_call_id 必须是非空字符串")
+        if len(self.expected_content_sha256) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in self.expected_content_sha256
+        ):
+            raise ValueError("expected_content_sha256 格式无效")
+        if self.message.role != "tool":
+            raise ValueError("replacement message 必须是 tool 消息")
 
 
 class ConversationHistory:
@@ -74,6 +97,37 @@ class ConversationHistory:
         """Return a shallow copy so callers cannot mutate internal state."""
 
         return list(self._messages)
+
+    def replace_tool_messages(
+        self,
+        replacements: tuple[ToolMessageReplacement, ...],
+    ) -> None:
+        """Atomically replace validated tool messages without changing length."""
+
+        if not isinstance(replacements, tuple) or not replacements:
+            raise ValueError("replacements 必须是非空 tuple")
+        indexes = [replacement.index for replacement in replacements]
+        if len(indexes) != len(set(indexes)):
+            raise ValueError("replacement index 不能重复")
+
+        for replacement in replacements:
+            if replacement.index >= len(self._messages):
+                raise ValueError("replacement index 超出历史范围")
+            current = self._messages[replacement.index]
+            if current.role != "tool":
+                raise ValueError("只能替换 tool 历史消息")
+            if current.tool_call_id != replacement.expected_tool_call_id:
+                raise ValueError("tool_call_id 前置条件不匹配")
+            current_digest = sha256(current.content.encode("utf-8")).hexdigest()
+            if current_digest != replacement.expected_content_sha256:
+                raise ValueError("tool content 前置条件不匹配")
+            if replacement.message.tool_call_id != current.tool_call_id:
+                raise ValueError("replacement 不能修改 tool_call_id")
+
+        updated = list(self._messages)
+        for replacement in replacements:
+            updated[replacement.index] = replacement.message
+        self._messages = updated
 
     def __len__(self) -> int:
         return len(self._messages)
