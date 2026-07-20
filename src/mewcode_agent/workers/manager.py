@@ -196,6 +196,15 @@ class WorkerManager:
             raise
         return await self.get(task_id)
 
+    async def wait_terminal(self, task_id: str) -> WorkerTaskSnapshot:
+        """Wait for either foreground or background work without changing mode."""
+
+        async with self._lock:
+            self._require_record(task_id)
+            task = self._tasks[task_id]
+        await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+        return await self.get(task_id)
+
     async def detach(
         self,
         task_id: str,

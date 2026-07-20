@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 import shutil
 import subprocess
@@ -446,6 +447,33 @@ async def test_clean_worktree_worker_is_deleted_automatically(
     assert workspace.reason is None
     assert not Path(workspace.path).exists()
     assert manager.list_records() == ()
+    await manager.close()
+
+
+async def test_team_worker_preserves_clean_worktree_for_integration(
+    tmp_path: Path,
+) -> None:
+    root = git_repository(tmp_path)
+    provider = ScriptedProvider([completed_round("done")])
+    executor, manager = await worktree_executor(provider, root)
+    definition = role(tmp_path, isolation="worktree")
+    worker_spec = replace(
+        spec(tmp_path, definition=definition),
+        preserve_workspace=True,
+    )
+
+    await executor.run(worker_spec, WorkerUsageCollector())
+    workspace = executor.workspace_snapshot(worker_spec.task_id)
+
+    assert workspace is not None
+    assert workspace.preserved is True
+    assert workspace.reason == "team_integration_pending"
+    assert Path(workspace.path).exists()
+    assert len(manager.list_records()) == 1
+    await manager.delete(
+        f"worker/{worker_spec.task_id}",
+        discard_confirmed=True,
+    )
     await manager.close()
 
 

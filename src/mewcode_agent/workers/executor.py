@@ -244,7 +244,7 @@ class WorkerExecutor:
             )
         finally:
             if workspace_root is not None:
-                await self._finish_workspace(spec.task_id, workspace_root)
+                await self._finish_workspace(spec, workspace_root)
 
     async def _prepare_workspace(
         self,
@@ -447,7 +447,12 @@ class WorkerExecutor:
             fork_report_format_valid(final) if definition is None else True,
         )
 
-    async def _finish_workspace(self, task_id: str, path: Path) -> None:
+    async def _finish_workspace(
+        self,
+        spec: WorkerExecutionSpec,
+        path: Path,
+    ) -> None:
+        task_id = spec.task_id
         if self._worktree_manager is None:
             self._workspaces[task_id] = WorkerWorkspaceSnapshot(
                 str(path),
@@ -472,6 +477,19 @@ class WorkerExecutor:
             return
         try:
             status = await self._worktree_manager.status(f"worker/{task_id}")
+            if spec.preserve_workspace:
+                if status.reason_code is not None:
+                    reason = status.reason_code
+                elif status.dirty:
+                    reason = "worktree_dirty"
+                else:
+                    reason = "team_integration_pending"
+                self._workspaces[task_id] = WorkerWorkspaceSnapshot(
+                    str(path),
+                    True,
+                    reason,
+                )
+                return
             if status.deletion_safe:
                 await self._worktree_manager.delete(f"worker/{task_id}")
                 self._workspaces[task_id] = WorkerWorkspaceSnapshot(

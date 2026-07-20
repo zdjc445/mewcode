@@ -50,10 +50,19 @@ def validate_worktree_name(value: str) -> str:
     segments = value.split("/")
     if not 1 <= len(segments) <= 4:
         raise ValueError("worktree name 段数无效")
-    for segment in segments:
+    for index, segment in enumerate(segments):
+        worker_task_segment = (
+            len(segments) == 2
+            and segments[0] == "worker"
+            and index == 1
+            and _TASK_ID.fullmatch(segment) is not None
+        )
         if (
             segment in ("", ".", "..")
-            or _NAME_SEGMENT.fullmatch(segment) is None
+            or (
+                _NAME_SEGMENT.fullmatch(segment) is None
+                and not worker_task_segment
+            )
             or segment.casefold() in _WINDOWS_DEVICES
         ):
             raise ValueError("worktree name 段无效")

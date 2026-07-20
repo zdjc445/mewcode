@@ -476,10 +476,31 @@ class TeamMailboxMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class TeamDependencyResult:
+    task_id: str
+    title: str
+    status: Literal["completed", "integrated"]
+    result: str
+
+    def __post_init__(self) -> None:
+        validate_team_hex_id(self.task_id, "dependency task_id")
+        _single_line(self.title, maximum=200, field_name="dependency title")
+        if self.status not in ("completed", "integrated"):
+            raise ValueError("dependency status 无效")
+        if (
+            not isinstance(self.result, str)
+            or not self.result.strip()
+            or len(self.result) > 8000
+        ):
+            raise ValueError("dependency result 无效")
+
+
+@dataclass(frozen=True, slots=True)
 class TeamBackendRequest:
     team_id: str
     member: TeamMemberRecord
     task: TeamTaskRecord
+    dependencies: tuple[TeamDependencyResult, ...]
     mailbox: tuple[TeamMailboxMessage, ...]
     history: tuple[ChatMessage, ...]
 
@@ -493,6 +514,12 @@ class TeamBackendRequest:
             raise ValueError("Backend member/task 不匹配")
         if self.task.assignee != self.member.name:
             raise ValueError("Backend task assignee 不匹配")
+        if (
+            not isinstance(self.dependencies, tuple)
+            or tuple(item.task_id for item in self.dependencies)
+            != self.task.dependencies
+        ):
+            raise ValueError("Backend dependencies 与 task 不匹配")
         if not isinstance(self.mailbox, tuple) or any(
             item.team_id != self.team_id or item.recipient != self.member.name
             for item in self.mailbox

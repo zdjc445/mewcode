@@ -265,6 +265,7 @@ class WorkerExecutionSpec:
     visible_tools: frozenset[str]
     provider_id: str
     model: str
+    preserve_workspace: bool = False
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{32}", self.task_id) is None:
@@ -281,12 +282,12 @@ class WorkerExecutionSpec:
             raise ValueError("worker_type 无效")
         if self.kind not in ("definition", "fork", "hook"):
             raise ValueError("kind 无效")
-        if (
-            not isinstance(self.task, str)
-            or not self.task.strip()
-            or len(self.task) > 32768
-        ):
-            raise ValueError("task 必须是 1..32768 code points 的字符串")
+        if type(self.preserve_workspace) is not bool:
+            raise ValueError("preserve_workspace 必须是 bool")
+        if not isinstance(self.task, str) or not self.task.strip():
+            raise ValueError("task 必须是非空字符串")
+        if not self.preserve_workspace and len(self.task) > 32768:
+            raise ValueError("普通 task 必须是 1..32768 code points 的字符串")
         if self.kind == "definition" and self.definition is None:
             raise ValueError("definition kind 必须携带角色定义")
         if self.kind == "fork" and self.definition is not None:

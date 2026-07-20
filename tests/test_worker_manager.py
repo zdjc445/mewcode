@@ -58,6 +58,31 @@ async def test_foreground_completion_returns_terminal_without_notification() -> 
     await manager.close()
 
 
+async def test_wait_terminal_waits_for_background_without_changing_mode() -> None:
+    release = asyncio.Event()
+
+    async def runner(_spec, _usage):
+        await release.wait()
+        return WorkerExecutionOutcome("done", True)
+
+    manager = WorkerManager(WorkerRuntimeConfig(), runner)
+    started = await manager.start(
+        spec("8" * 32),
+        background=True,
+        transition="explicit",
+    )
+    waiting = asyncio.create_task(manager.wait_terminal(started.task_id))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    release.set()
+    completed = await waiting
+
+    assert completed.state == "completed"
+    assert completed.mode == "background"
+    await manager.close()
+
+
 async def test_foreground_timeout_detaches_same_task_and_notifies_later() -> None:
     release = asyncio.Event()
 

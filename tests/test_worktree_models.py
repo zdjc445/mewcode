@@ -63,6 +63,13 @@ def test_branch_mapping_is_stable_bounded_and_collision_resistant() -> None:
     assert len(longest) <= 120
 
 
+def test_worker_name_accepts_digit_prefixed_task_id() -> None:
+    name = "worker/" + "3" * 32
+
+    assert validate_worktree_name(name) == name
+    assert worktree_branch_name(name).startswith("mewcode-wt-worker-")
+
+
 def test_managed_path_uses_name_segments(tmp_path: Path) -> None:
     root = (tmp_path / "managed").resolve()
 

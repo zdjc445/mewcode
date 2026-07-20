@@ -201,6 +201,7 @@ def test_backend_contract_validates_identity_history_and_workspace(
         member,
         task,
         (),
+        (),
         (ChatMessage("user", "old"), ChatMessage("assistant", "done")),
     )
     assert request.task.task_id == TASK_ID
