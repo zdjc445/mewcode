@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -104,6 +104,10 @@ class _AgentLoopFailure(Exception):
 
 _PROVIDER_DONE = object()
 
+RequestControlProvider = Callable[
+    [], Awaitable[tuple[RuntimeInstruction, ...]]
+]
+
 
 class AgentLoop:
     """Run one user request through LLM/tool turns."""
@@ -121,6 +125,7 @@ class AgentLoop:
         context_window_manager: ContextWindowManager | None,
         visible_tool_names: Callable[[], frozenset[str] | None] | None = None,
         hook_engine: HookEngine | None = None,
+        request_control_provider: RequestControlProvider | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -132,6 +137,7 @@ class AgentLoop:
         self._context_window_manager = context_window_manager
         self._visible_tool_names_provider = visible_tool_names
         self._hook_engine = hook_engine
+        self._request_control_provider = request_control_provider
 
     async def _dispatch_hook(
         self,
@@ -357,6 +363,24 @@ class AgentLoop:
                     history_length=len(history.snapshot()),
                     mode=initial_mode,
                 )
+                if self._request_control_provider is not None:
+                    controls = await self._request_control_provider()
+                    if not isinstance(controls, tuple):
+                        raise ValueError(
+                            "request_control_provider 必须返回 tuple"
+                        )
+                    for control in controls:
+                        if (
+                            not isinstance(control, RuntimeInstruction)
+                            or control.scope != "request"
+                        ):
+                            raise ValueError(
+                                "request control 必须是 scope=request"
+                            )
+                        self._prompt_runtime.inject(
+                            control,
+                            history_length=len(history.snapshot()),
+                        )
             except (ValueError, RuntimeError):
                 state = "failed"
                 yield await self._run_error_event(

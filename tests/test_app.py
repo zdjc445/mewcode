@@ -1079,3 +1079,44 @@ async def test_escape_cancels_active_approval_wait() -> None:
         assert prompt_input.has_focus is True
 
     assert loop.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_escape_detaches_foreground_worker_before_parent_cancel() -> None:
+    events: list[str] = []
+
+    class RecordingWorkerManager:
+        async def detach_foreground(self) -> str:
+            events.append("detach")
+            return "a" * 32
+
+    class RecordingLoop(ToolApprovalAgentLoop):
+        async def run(self, message, history, *, plan_only, context):
+            async for event in super().run(
+                message,
+                history,
+                plan_only=plan_only,
+                context=context,
+            ):
+                yield event
+            if context.cancelled:
+                events.append("cancel")
+
+    loop = RecordingLoop()
+    app = ChatApp(
+        loop,  # type: ignore[arg-type]
+        ConversationHistory(),
+        provider_id="provider",
+        model="model",
+        worker_manager=RecordingWorkerManager(),  # type: ignore[arg-type]
+    )
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "执行写工具"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("escape")
+        await app.workers.wait_for_complete()
+
+    assert events == ["detach", "cancel"]

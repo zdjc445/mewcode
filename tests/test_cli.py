@@ -72,6 +72,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
                 context_window_manager: object,
                 visible_tool_names: object,
                 hook_engine: object,
+                request_control_provider: object,
         ) -> None:
             agent_loop_calls.append(
                 {
@@ -83,6 +84,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
                         "context_window_manager": context_window_manager,
                         "visible_tool_names": visible_tool_names,
                         "hook_engine": hook_engine,
+                        "request_control_provider": request_control_provider,
                 }
             )
 
@@ -103,6 +105,8 @@ def test_cli_builds_and_runs_app_with_valid_config(
         "status",
         "mode",
         "skills",
+        "workers",
+        "worker",
         "commit",
         "review",
         "test",
@@ -120,6 +124,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
     assert registry.get("read_file") is not None
     assert registry.get("read_context_artifact") is not None
     assert registry.get("load_skill") is not None
+    assert registry.get("spawn_worker") is not None
     assert agent_loop_calls[0]["scheduler"] is not None
     assert agent_loop_calls[0]["context_window_manager"] is not None
     assert callable(agent_loop_calls[0]["visible_tool_names"])
@@ -409,6 +414,7 @@ def test_cli_builds_prompt_dependencies_from_exact_two_layers(
             "context_window_manager",
             "visible_tool_names",
             "hook_engine",
+            "request_control_provider",
         }
     composer = calls[0]["prompt_composer"]
     frame = composer.compose([], ())  # type: ignore[union-attr]
@@ -834,6 +840,7 @@ def test_cli_shutdown_flushes_notes_before_session_mcp_and_artifact(
     original_session_close = cli.SessionManager.close
     original_mcp_close = cli.McpConnectionManager.close
     original_artifact_close = cli.ContextArtifactStore.close
+    original_worker_close = cli.WorkerManager.close
 
     async def flush_notes(self: object) -> None:
         events.append("notes_flush")
@@ -851,6 +858,10 @@ def test_cli_shutdown_flushes_notes_before_session_mcp_and_artifact(
         events.append("artifact_close")
         await original_artifact_close(self)  # type: ignore[arg-type]
 
+    async def close_worker(self: object) -> None:
+        events.append("worker_close")
+        await original_worker_close(self)  # type: ignore[arg-type]
+
     async def run_app(_self: object) -> None:
         events.append("app")
 
@@ -858,11 +869,13 @@ def test_cli_shutdown_flushes_notes_before_session_mcp_and_artifact(
     monkeypatch.setattr(cli.SessionManager, "close", close_session)
     monkeypatch.setattr(cli.McpConnectionManager, "close", close_mcp)
     monkeypatch.setattr(cli.ContextArtifactStore, "close", close_artifact)
+    monkeypatch.setattr(cli.WorkerManager, "close", close_worker)
     monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
 
     assert cli.main() == 0
     assert events == [
         "app",
+        "worker_close",
         "notes_flush",
         "session_close",
         "mcp_close",

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import TYPE_CHECKING
+
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -47,6 +50,9 @@ from mewcode_agent.commands import (
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.notes import NotesManager
 from mewcode_agent.sessions import SessionError
+
+if TYPE_CHECKING:
+    from mewcode_agent.workers import WorkerManager
 
 
 class ToolApprovalScreen(ModalScreen[ToolApprovalDecision | None]):
@@ -381,6 +387,7 @@ class ChatApp(App[None]):
         model: str,
         command_registry: CommandRegistry | None = None,
         notes_manager: NotesManager | None = None,
+        worker_manager: WorkerManager | None = None,
     ) -> None:
         super().__init__()
         self.agent_loop = agent_loop
@@ -388,6 +395,7 @@ class ChatApp(App[None]):
         self.provider_id = provider_id
         self.model = model
         self.notes_manager = notes_manager
+        self.worker_manager = worker_manager
         self.command_registry = command_registry or CommandRegistry()
         if not self.command_registry.frozen:
             self.command_registry.freeze()
@@ -687,6 +695,22 @@ class ChatApp(App[None]):
 
     def action_cancel_run(self) -> None:
         if self._active_context is not None:
-            self._active_context.cancel()
+            context = self._active_context
+            if self.worker_manager is None:
+                context.cancel()
+            else:
+                asyncio.create_task(
+                    self._detach_worker_then_cancel(context)
+                )
         elif self._active_input_worker is not None:
             self._active_input_worker.cancel()
+
+    async def _detach_worker_then_cancel(
+        self,
+        context: AgentRunContext,
+    ) -> None:
+        assert self.worker_manager is not None
+        try:
+            await self.worker_manager.detach_foreground()
+        finally:
+            context.cancel()

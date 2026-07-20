@@ -164,6 +164,20 @@ class SkillRuntime:
             forked.set_isolated_runner(self._isolated_runner)
         return forked
 
+    def fork_current(self, prompt_runtime: PromptRuntime) -> SkillRuntime:
+        """Clone active shared Skill state for an isolated worker."""
+
+        forked = SkillRuntime(
+            SkillCatalog(self._catalog.snapshot),
+            self._registry,
+            prompt_runtime,
+            reserved_command_names=self._reserved_command_names,
+            install_tools=False,
+        )
+        forked._active = OrderedDict(self._active)
+        forked._sync_controls()
+        return forked
+
     def prime_isolated(
         self,
         definition: SkillDefinition,

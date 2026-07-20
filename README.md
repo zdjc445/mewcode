@@ -155,7 +155,7 @@ rules:
 - `shell`：在项目根目录使用 PowerShell 或 `/bin/sh` 执行明确 command；stdout/stderr 不进入模型。
 - `prompt`：作为 request 级 Prompt control 注入，不写入普通历史或会话 JSONL；无活动 request 时排队到下一次请求。
 - `http`：使用共享异步客户端发送绝对 HTTP(S) URL，不跟随重定向，响应正文不进入模型。
-- `subagent`：当前返回脱敏的 `hook_subagent_unavailable` 诊断，Chapter 11 接入统一子工作者后启用真实执行。
+- `subagent`：通过统一 WorkerManager 启动后台任务；`context` 精确支持 `none`、`recent` 和 `summary`，启动失败只产生脱敏 Hook 诊断。
 
 `async: true` 的 shell、HTTP 或 subagent 动作不会阻塞 Agent，退出时会在各自超时内等待收尾。`once: true` 在当前应用进程内最多调度一次，失败或超时不自动重试。同步 `tool.before_execute` 规则可以使用 `intercept: {deny: true, reason: ...}` 返回 `tool_blocked_by_hook`；它只会进一步拒绝已经通过安全策略与审批的调用，不能授予权限或修改工具参数/结果。
 
@@ -328,6 +328,28 @@ tools:
 
 内置样板包括 shared `commit`、isolated recent `review` 和 isolated summary `test`。每个生效 Skill 自动注册 `/<name> [arguments]`；执行前会重新读取源文件以应用 SOP 和工具热更新。新增、删除、重命名或覆盖关系变化需要执行 `/skills rescan`。
 
+## 子工作者与后台任务
+
+Agent 通过唯一工具 `spawn_worker` 启动子工作者。传入精确 `type` 使用预定义角色；省略 `type` 创建 Fork，并强制在后台运行。内置角色为 `explore`、`plan`、`general`，`verify` 由用户配置显式启用。角色来源优先级为项目 `.mewcode/workers/`、用户 `~/.mewcode-agent/workers/`、内置、插件适配器；同名角色完整覆盖，不合并字段或 SOP。
+
+用户运行配置固定为 `Path.home() / ".mewcode-agent" / "workers.yaml"`，不存在时使用以下默认值且不会自动创建：
+
+```yaml
+version: 1
+max_concurrency: 4
+foreground_timeout_seconds: 15
+background_allowed_tools:
+  - read_file
+  - find_files
+  - search_code
+  - read_context_artifact
+enable_verify_role: false
+```
+
+Worker 使用独立历史、权限临时状态、文件已读缓存和 Token 统计；共享 Provider adapter、Hook 引擎与项目文件系统。前台等待超时或按 Escape 时，同一 Worker 实例转入后台，不会重启请求。后台终态在主 Agent 的下一次请求中作为 request control 注入，不写入普通历史、会话 JSONL、摘要或笔记。Worker 永远看不到 `spawn_worker`，后台工具还会与 `background_allowed_tools` 取交集。
+
+`/workers` 列出任务，`/workers roles` 列出生效角色；`/worker show <task_id>` 显示完整脱敏记录，`/worker cancel <task_id>` 经确认后终止任务。完整角色 frontmatter、Fork 报告格式和状态机见 [`docs/ch11/spec.md`](docs/ch11/spec.md)。
+
 ## 斜杠命令
 
 所有 `/` 前缀输入先进入集中式命令注册中心。命令名是第一个 ASCII 空格前的部分，按小写解析，因此 `/HELP`、`/Help` 和 `/help` 等价；参数原文不转换大小写、路径或标识符。未知命令不会发送给模型，统一引导使用 `/help`。
@@ -338,6 +360,8 @@ tools:
 | `/status` | `/stat` | 显示模型、模式、会话、Prompt Token 估值、笔记和权限状态 |
 | `/mode [plan\|execute]` | 无 | 查看或切换后续普通消息的默认模式 |
 | `/skills [show <name>\|rescan]` | 无 | 查看 Skill、显示脱敏详情或原子重新扫描 |
+| `/workers [roles]` | 无 | 列出 Worker 任务或生效角色 |
+| `/worker <show\|cancel> <task_id>` | 无 | 显示或确认终止一个 Worker 任务 |
 | `/commit [arguments]` | 无 | 加载内置或被覆盖的 shared 提交 Skill |
 | `/review [arguments]` | 无 | 加载内置或被覆盖的 isolated 代码审查 Skill |
 | `/test [arguments]` | 无 | 加载内置或被覆盖的 isolated 测试 Skill |
@@ -393,6 +417,7 @@ uv run python -m compileall -q src tests integration_tests
 - 支持用户级与项目级分流的自动笔记、查看、定位和确认清空。
 - 支持集中式斜杠命令注册、别名冲突检查、大小写不敏感分发、帮助和 Tab 补全。
 - 支持项目、用户、内置三层 Skill，按需加载 SOP、最小工具白名单、shared/isolated 执行和动态命令。
+- 支持四层 Worker 角色、定义式/Fork 子工作者、前后台无损切换、独立状态与下一请求终态通知。
 - 支持目录 Skill 的严格 JSON Schema 与无 shell Python 子进程工具协议。
 - 支持两层声明式 Hook、生命周期事件、同步/异步动作、Prompt 注入、HTTP、shell 和工具拒绝拦截。
 - 支持本地状态和进程内权限模式覆盖。

@@ -563,6 +563,51 @@ def terminal_events(events: list[AgentEvent]) -> list[AgentEvent]:
     ]
 
 
+async def test_request_control_provider_injects_without_history() -> None:
+    provider = ScriptedProvider(
+        [[ProviderTextDelta("done"), ProviderTurnEnd("end_turn")]]
+    )
+    runtime, composer = make_prompt_dependencies()
+    calls = 0
+
+    async def controls() -> tuple[RuntimeInstruction, ...]:
+        nonlocal calls
+        calls += 1
+        return (
+            RuntimeInstruction(
+                "runtime.workers.notification_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "context",
+                "request",
+                '{"type":"worker_terminal"}',
+                "worker",
+            ),
+        )
+
+    loop = AgentLoop(
+        provider,
+        make_registry(),
+        prompt_runtime=runtime,
+        prompt_composer=composer,
+        context_window_manager=None,
+        request_control_provider=controls,
+    )
+    history = ConversationHistory()
+
+    events = await collect_run(loop, "new request", history)
+
+    assert events[-1] == FinalResponseEvent("done", 1)
+    assert calls == 1
+    assert [message.role for message in history.snapshot()] == [
+        "user",
+        "assistant",
+    ]
+    assert any(
+        isinstance(item, ControlMessage)
+        and item.instruction_id.endswith("a" * 32)
+        for item in provider.requests[0].items
+    )
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_prepares_compaction_and_records_primary_usage() -> None:
     provider = IntegratedCompactionProvider()

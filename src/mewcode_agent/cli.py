@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -89,6 +90,18 @@ from mewcode_agent.skills import (
     scan_skill_catalog,
 )
 from mewcode_agent.tools.registry import create_core_registry
+from mewcode_agent.workers import (
+    HookSubagentLauncher,
+    SpawnWorkerTool,
+    WorkerCatalog,
+    WorkerCommandManager,
+    WorkerConfigError,
+    WorkerDiagnostic,
+    WorkerExecutor,
+    WorkerManager,
+    builtin_worker_root,
+    scan_worker_catalog,
+)
 
 CONFIG_FILENAME = "llm_providers.yaml"
 
@@ -142,6 +155,17 @@ def _print_hook_diagnostic(diagnostic: HookDiagnostic) -> None:
     )
 
 
+def _print_worker_diagnostic(diagnostic: WorkerDiagnostic) -> None:
+    print(
+        "Worker 警告："
+        f"source={diagnostic.source} "
+        f"candidate={diagnostic.candidate} "
+        f"code={diagnostic.code} "
+        f"{diagnostic.message}",
+        file=sys.stderr,
+    )
+
+
 async def run_application() -> int:
     """Build and run one application session on the current event loop."""
 
@@ -153,6 +177,7 @@ async def run_application() -> int:
     hook_engine: HookEngine | None = None
     hook_lifecycle: HookLifecycle | None = None
     hook_lifecycle_started = False
+    worker_manager: WorkerManager | None = None
     try:
         session_environment = collect_session_environment()
         working_directory = Path(
@@ -262,7 +287,7 @@ async def run_application() -> int:
         )
         await mcp_manager.activate_all()
         reserved_command_names = frozenset(
-            (*BUILTIN_COMMAND_KEYS, "skills")
+            (*BUILTIN_COMMAND_KEYS, "skills", "workers", "worker")
         )
         builtin_skills = builtin_skill_root()
         skill_snapshot = scan_skill_catalog(
@@ -281,6 +306,16 @@ async def run_application() -> int:
         )
         load_skill_tool = LoadSkillTool(skill_runtime)
         registry.register(load_skill_tool)
+        builtin_workers = builtin_worker_root()
+        worker_snapshot = scan_worker_catalog(
+            project_root=working_directory,
+            user_root=user_config_directory,
+            builtin_root=builtin_workers,
+            existing_tool_names=registry.tool_names(),
+            provider_ids=config.providers,
+            diagnostic_handler=_print_worker_diagnostic,
+        )
+        worker_catalog = WorkerCatalog(worker_snapshot)
         security_boundary = registry.security_boundary
         assert security_boundary is not None
         security_policy = SecurityPolicyEngine(
@@ -320,6 +355,96 @@ async def run_application() -> int:
             session_id_provider=lambda: session_manager.active_session_id,
             diagnostic_handler=_print_hook_diagnostic,
         )
+        provider_cache = {provider_config.provider_id: provider}
+
+        def resolve_worker_provider(provider_id: str):
+            cached = provider_cache.get(provider_id)
+            if cached is None:
+                cached = create_provider(
+                    config.providers[provider_id],
+                    config.api_key,
+                )
+                provider_cache[provider_id] = cached
+            return cached
+
+        def create_worker_policy(permission_mode: str):
+            policy = SecurityPolicyEngine(
+                security_configuration,
+                security_boundary,
+                approval_store=approval_store,
+            )
+            if permission_mode != "inherit":
+                policy.set_mode_override(permission_mode)
+            return policy
+
+        def create_worker_context_manager(worker_provider):
+            worker_provider_config = config.providers[
+                worker_provider.provider_id
+            ]
+            return ContextWindowManager(
+                worker_provider,
+                ToolResultCompactor(
+                    artifact_store,
+                    config=compaction_config,
+                ),
+                ContextSummarizer(
+                    worker_provider,
+                    timeout_seconds=loop_config.llm_timeout_seconds,
+                    config=compaction_config,
+                ),
+                context_window_tokens=(
+                    worker_provider_config.context_window_tokens
+                ),
+                max_tokens=worker_provider_config.max_tokens,
+                config=compaction_config,
+            )
+
+        worker_executor = WorkerExecutor(
+            registry=registry,
+            parent_prompt_runtime=prompt_runtime,
+            prompt_composer=prompt_composer,
+            provider_resolver=resolve_worker_provider,
+            policy_engine_factory=create_worker_policy,
+            context_manager_factory=create_worker_context_manager,
+            hook_engine=hook_engine,
+            prompt_hook_bridge=prompt_hook_bridge,
+            skill_runtime=skill_runtime,
+            load_skill_tool=load_skill_tool,
+        )
+        worker_manager = WorkerManager(
+            worker_snapshot.runtime_config,
+            worker_executor.run,
+            cancel_runner=worker_executor.cancel,
+        )
+        provider_models = {
+            provider_id: item.model
+            for provider_id, item in config.providers.items()
+        }
+        spawn_worker_tool = SpawnWorkerTool(
+            catalog=worker_catalog,
+            manager=worker_manager,
+            registry=registry,
+            main_history=history,
+            session_id_provider=lambda: session_manager.active_session_id,
+            parent_visible_tools=skill_runtime.visible_tool_names,
+            parent_provider_id=provider_config.provider_id,
+            provider_models=provider_models,
+        )
+        registry.register(spawn_worker_tool)
+        hook_subagent_launcher = HookSubagentLauncher(
+            catalog=worker_catalog,
+            manager=worker_manager,
+            registry=registry,
+            main_history=history,
+            session_id_provider=lambda: session_manager.active_session_id,
+            parent_visible_tools=skill_runtime.visible_tool_names,
+            parent_provider_id=provider_config.provider_id,
+            provider_models=provider_models,
+            summarizer=context_summarizer,
+        )
+        hook_action_runner.set_subagent_runner(
+            hook_subagent_launcher.launch
+        )
         scheduler = ToolScheduler(
             registry,
             interceptor=HookToolExecutionInterceptor(hook_engine),
@@ -339,22 +464,56 @@ async def run_application() -> int:
         NotesError,
         SkillConfigError,
         HookConfigError,
+        WorkerConfigError,
     ) as exc:
         try:
-            if session_manager is not None:
-                session_manager.close()
+            if worker_manager is not None:
+                await worker_manager.close()
         finally:
             try:
-                if mcp_manager is not None:
-                    await mcp_manager.close()
+                if hook_engine is not None:
+                    await hook_engine.close()
+                elif hook_action_runner is not None:
+                    await hook_action_runner.close()
             finally:
-                if artifact_store is not None:
-                    await artifact_store.close()
+                try:
+                    if session_manager is not None:
+                        session_manager.close()
+                finally:
+                    try:
+                        if mcp_manager is not None:
+                            await mcp_manager.close()
+                    finally:
+                        if artifact_store is not None:
+                            await artifact_store.close()
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
     try:
         assert hook_engine is not None
         assert hook_action_runner is not None
+        assert worker_manager is not None
+
+        async def worker_request_controls() -> tuple[
+            RuntimeInstruction, ...
+        ]:
+            notifications = await worker_manager.take_notifications(
+                session_manager.active_session_id
+            )
+            return tuple(
+                RuntimeInstruction(
+                    f"runtime.workers.notification_{item.task_id}",
+                    "context",
+                    "request",
+                    json.dumps(
+                        item.to_dict(),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    "worker",
+                )
+                for item in notifications
+            )
+
         agent_loop = AgentLoop(
             provider,
             registry,
@@ -364,6 +523,7 @@ async def run_application() -> int:
             context_window_manager=context_window_manager,
             visible_tool_names=skill_runtime.visible_tool_names,
             hook_engine=hook_engine,
+            request_control_provider=worker_request_controls,
         )
         isolated_executor = IsolatedSkillExecutor(
             provider=provider,
@@ -422,6 +582,20 @@ async def run_application() -> int:
             reserved_command_names=reserved_command_names,
             diagnostic_handler=_print_skill_diagnostic,
         )
+        worker_command_manager = WorkerCommandManager(
+            worker_catalog,
+            worker_manager,
+        )
+
+        async def session_switched(
+            previous: str,
+            restored: bool,
+        ) -> None:
+            await worker_manager.clear_notifications(previous)
+            await hook_lifecycle.session_switched(
+                previous,
+                restored=restored,
+            )
 
         command_registry = build_builtin_command_registry(
             BuiltinCommandServices(
@@ -439,12 +613,12 @@ async def run_application() -> int:
                 ),
                 activate_session,
                 activate_new_session,
-                lambda previous, restored: hook_lifecycle.session_switched(
-                    previous,
-                    restored=restored,
-                ),
+                session_switched,
             ),
-            extra_specs=(skill_command_manager.management_spec(),),
+            extra_specs=(
+                skill_command_manager.management_spec(),
+                *worker_command_manager.specs(),
+            ),
         )
         skill_command_manager.bind_registry(command_registry)
         command_registry.replace_dynamic(
@@ -458,6 +632,7 @@ async def run_application() -> int:
             model=provider_config.model,
             command_registry=command_registry,
             notes_manager=notes_manager,
+            worker_manager=worker_manager,
         )
         await hook_lifecycle.start()
         hook_lifecycle_started = True
@@ -470,21 +645,25 @@ async def run_application() -> int:
         assert notes_manager is not None
         assert hook_action_runner is not None
         assert hook_engine is not None
+        assert worker_manager is not None
         try:
-            await notes_manager.flush_on_exit()
+            await worker_manager.close()
         finally:
             try:
-                if hook_lifecycle_started and hook_lifecycle is not None:
-                    await hook_lifecycle.end_active_session()
-                await hook_engine.close()
+                await notes_manager.flush_on_exit()
             finally:
                 try:
-                    session_manager.close()
+                    if hook_lifecycle_started and hook_lifecycle is not None:
+                        await hook_lifecycle.end_active_session()
+                    await hook_engine.close()
                 finally:
                     try:
-                        await mcp_manager.close()
+                        session_manager.close()
                     finally:
-                        await artifact_store.close()
+                        try:
+                            await mcp_manager.close()
+                        finally:
+                            await artifact_store.close()
 
 
 def main() -> int:

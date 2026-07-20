@@ -6,10 +6,12 @@ from mewcode_agent.workers.catalog import (
     scan_worker_catalog,
     validate_worker_definitions,
 )
+from mewcode_agent.workers.commands import WorkerCommandManager
 from mewcode_agent.workers.loader import (
     load_worker_role,
     load_worker_runtime_config,
 )
+from mewcode_agent.workers.hooks import HookSubagentLauncher
 from mewcode_agent.workers.executor import (
     WorkerExecutor,
     definition_user_prompt,
@@ -17,12 +19,14 @@ from mewcode_agent.workers.executor import (
     fork_report_format_valid,
     fork_user_prompt,
     visible_worker_tools,
+    worker_execution_active,
 )
 from mewcode_agent.workers.manager import WorkerManager
 from mewcode_agent.workers.models import (
     WORKER_NAME_PATTERN,
     WORKER_TOOL_NAME_PATTERN,
     WorkerCatalogSnapshot,
+    WorkerCloseResult,
     WorkerConfigError,
     WorkerDiagnostic,
     WorkerError,
@@ -49,6 +53,8 @@ __all__ = [
     "WORKER_TOOL_NAME_PATTERN",
     "WorkerCatalog",
     "WorkerCatalogSnapshot",
+    "WorkerCloseResult",
+    "WorkerCommandManager",
     "WorkerConfigError",
     "WorkerDiagnostic",
     "WorkerError",
@@ -70,6 +76,7 @@ __all__ = [
     "WorkerUsageCollector",
     "WorkerUsageSnapshot",
     "SpawnWorkerTool",
+    "HookSubagentLauncher",
     "builtin_worker_root",
     "definition_user_prompt",
     "fork_history_prefix",
@@ -80,4 +87,5 @@ __all__ = [
     "scan_worker_catalog",
     "validate_worker_definitions",
     "visible_worker_tools",
+    "worker_execution_active",
 ]

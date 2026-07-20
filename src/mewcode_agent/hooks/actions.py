@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -79,6 +80,7 @@ PreparedHookAction: TypeAlias = (
     | PreparedHttpAction
     | PreparedSubagentAction
 )
+HookSubagentRunner: TypeAlias = Callable[[str, str], Awaitable[None]]
 
 
 class HookActionRunner:
@@ -88,6 +90,7 @@ class HookActionRunner:
         project_root: Path,
         prompt_sink: HookPromptSink,
         http_client: httpx.AsyncClient | None = None,
+        subagent_runner: HookSubagentRunner | None = None,
     ) -> None:
         if not isinstance(project_root, Path) or not project_root.is_absolute():
             raise ValueError("project_root 必须是绝对 Path")
@@ -96,7 +99,13 @@ class HookActionRunner:
         self._http_client = http_client or httpx.AsyncClient(
             follow_redirects=False
         )
+        self._subagent_runner = subagent_runner
         self._closed = False
+
+    def set_subagent_runner(self, runner: HookSubagentRunner) -> None:
+        if not callable(runner):
+            raise ValueError("subagent runner 必须可调用")
+        self._subagent_runner = runner
 
     def prepare(
         self,
@@ -195,10 +204,21 @@ class HookActionRunner:
                     "Hook HTTP 返回非成功状态",
                 )
             return
-        raise HookActionError(
-            "hook_subagent_unavailable",
-            "Hook subagent 执行器尚未接入",
-        )
+        assert isinstance(action, PreparedSubagentAction)
+        if self._subagent_runner is None:
+            raise HookActionError(
+                "hook_subagent_unavailable",
+                "Hook subagent 执行器尚未接入",
+            )
+        try:
+            await self._subagent_runner(action.task, action.context)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise HookActionError(
+                "hook_subagent_failed",
+                "Hook subagent 启动失败",
+            ) from exc
 
     async def _run_shell(self, command: str) -> None:
         executable: str

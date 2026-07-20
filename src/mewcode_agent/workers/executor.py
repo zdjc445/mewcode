@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import ExitStack, nullcontext
+from contextvars import ContextVar
 from hashlib import sha256
 import re
 
@@ -25,6 +26,8 @@ from mewcode_agent.prompting.models import RuntimeInstruction
 from mewcode_agent.prompting.runtime import PromptRuntime
 from mewcode_agent.providers.base import LLMProvider
 from mewcode_agent.security.policy import SecurityPolicyEngine
+from mewcode_agent.skills.runtime import SkillRuntime
+from mewcode_agent.skills.tools import LoadSkillTool
 from mewcode_agent.tools.registry import ToolRegistry
 from mewcode_agent.workers.models import (
     WorkerError,
@@ -52,6 +55,14 @@ _FORK_HEADINGS = (
     "## Risks",
     "## Next Steps",
 )
+_WORKER_EXECUTION_ACTIVE: ContextVar[bool] = ContextVar(
+    "mewcode_worker_execution_active",
+    default=False,
+)
+
+
+def worker_execution_active() -> bool:
+    return _WORKER_EXECUTION_ACTIVE.get()
 
 
 def fork_history_prefix(
@@ -167,7 +178,13 @@ class WorkerExecutor:
         context_manager_factory: ContextManagerFactory,
         hook_engine: HookEngine | None = None,
         prompt_hook_bridge: PromptHookBridge | None = None,
+        skill_runtime: SkillRuntime | None = None,
+        load_skill_tool: LoadSkillTool | None = None,
     ) -> None:
+        if (skill_runtime is None) != (load_skill_tool is None):
+            raise ValueError(
+                "skill_runtime 与 load_skill_tool 必须同时提供或省略"
+            )
         self._registry = registry
         self._parent_prompt_runtime = parent_prompt_runtime
         self._prompt_composer = prompt_composer
@@ -176,6 +193,16 @@ class WorkerExecutor:
         self._context_manager_factory = context_manager_factory
         self._hook_engine = hook_engine
         self._prompt_hook_bridge = prompt_hook_bridge
+        self._skill_runtime = skill_runtime
+        self._load_skill_tool = load_skill_tool
+        self._contexts: dict[str, AgentRunContext] = {}
+
+    def cancel(self, task_id: str) -> bool:
+        context = self._contexts.get(task_id)
+        if context is None:
+            return False
+        context.cancel()
+        return True
 
     async def run(
         self,
@@ -189,7 +216,7 @@ class WorkerExecutor:
             extra_controls=controls
         )
         history = ConversationHistory()
-        if spec.kind == "fork":
+        if spec.parent_history:
             history.restore(fork_history_prefix(spec.parent_history))
         permission_mode: WorkerPermissionMode = (
             definition.permission_mode if definition is not None else "inherit"
@@ -219,10 +246,11 @@ class WorkerExecutor:
             hook_engine=self._hook_engine,
         )
         context = AgentRunContext()
+        self._contexts[spec.task_id] = context
         final: str | None = None
         prompt = (
             fork_user_prompt(spec.task)
-            if spec.kind == "fork"
+            if definition is None
             else definition_user_prompt(spec.task)
         )
         cache_binding = (
@@ -232,12 +260,26 @@ class WorkerExecutor:
         )
         try:
             with ExitStack() as stack:
+                worker_token = _WORKER_EXECUTION_ACTIVE.set(True)
+                stack.callback(_WORKER_EXECUTION_ACTIVE.reset, worker_token)
                 stack.enter_context(cache_binding)
                 if self._prompt_hook_bridge is not None:
                     stack.enter_context(
                         self._prompt_hook_bridge.bind_runtime(
                             runtime,
                             history_length_provider=lambda: len(history),
+                        )
+                    )
+                if (
+                    self._skill_runtime is not None
+                    and self._load_skill_tool is not None
+                ):
+                    worker_skill_runtime = self._skill_runtime.fork_current(
+                        runtime
+                    )
+                    stack.enter_context(
+                        self._load_skill_tool.bind_runtime(
+                            worker_skill_runtime
                         )
                     )
                 async for event in loop.run(
@@ -258,9 +300,11 @@ class WorkerExecutor:
             raise
         except Exception as exc:
             raise WorkerError("worker_failed", "Worker 执行失败") from exc
+        finally:
+            self._contexts.pop(spec.task_id, None)
         if final is None:
             raise WorkerError("worker_failed", "Worker 未返回最终结果")
         return WorkerExecutionOutcome(
             final,
-            fork_report_format_valid(final) if spec.kind == "fork" else True,
+            fork_report_format_valid(final) if definition is None else True,
         )

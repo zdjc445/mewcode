@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Literal
 
 from mewcode_agent.workers.models import (
+    WorkerCloseResult,
     WorkerError,
     WorkerExecutionOutcome,
     WorkerExecutionSpec,
@@ -26,6 +27,7 @@ WorkerRunner = Callable[
     [WorkerExecutionSpec, WorkerUsageCollector],
     Awaitable[WorkerExecutionOutcome],
 ]
+WorkerCancelRunner = Callable[[str], bool]
 
 
 @dataclass(slots=True)
@@ -51,18 +53,21 @@ class WorkerManager:
         runner: WorkerRunner,
         *,
         now: Callable[[], datetime] | None = None,
+        cancel_runner: WorkerCancelRunner | None = None,
     ) -> None:
         if not callable(runner):
             raise ValueError("runner 必须可调用")
         self._config = runtime_config
         self._runner = runner
         self._now = now or (lambda: datetime.now().astimezone())
+        self._cancel_runner = cancel_runner
         self._records: dict[str, _WorkerRecord] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._notifications: dict[str, list[str]] = {}
         self._foreground_task_id: str | None = None
         self._lock = asyncio.Lock()
         self._closed = False
+        self._close_result: WorkerCloseResult | None = None
 
     def _timestamp(self) -> str:
         current = self._now()
@@ -131,7 +136,11 @@ class WorkerManager:
             await self._finish(record, "cancelled", error_code="worker_cancelled")
             raise
         except WorkerError as exc:
-            await self._finish(record, "failed", error_code=exc.code)
+            await self._finish(
+                record,
+                "cancelled" if exc.code == "worker_cancelled" else "failed",
+                error_code=exc.code,
+            )
         except Exception:
             await self._finish(record, "failed", error_code="worker_failed")
         else:
@@ -225,6 +234,8 @@ class WorkerManager:
             if record.state not in ("starting", "running"):
                 return False
             task = self._tasks[task_id]
+            if self._cancel_runner is not None:
+                self._cancel_runner(task_id)
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await self._finish(record, "cancelled", error_code="worker_cancelled")
@@ -245,17 +256,26 @@ class WorkerManager:
         async with self._lock:
             return len(self._notifications.pop(session_id, ()))
 
-    async def close(self) -> None:
+    async def close(self) -> WorkerCloseResult:
         async with self._lock:
+            if self._close_result is not None:
+                return self._close_result
             self._closed = True
             active = tuple(
                 (self._records[task_id], task)
                 for task_id, task in self._tasks.items()
                 if self._records[task_id].state in ("starting", "running")
             )
-            for _, task in active:
-                task.cancel()
+            for record, _ in active:
+                if self._cancel_runner is not None:
+                    self._cancel_runner(record.spec.task_id)
         if active:
+            await asyncio.sleep(0)
+            cancelled = 0
+            for _, task in active:
+                if not task.done():
+                    task.cancel()
+                    cancelled += 1
             await asyncio.gather(
                 *(task for _, task in active),
                 return_exceptions=True,
@@ -266,6 +286,19 @@ class WorkerManager:
                     "cancelled",
                     error_code="worker_cancelled",
                 )
+        else:
+            cancelled = 0
+        async with self._lock:
+            cleared_notifications = sum(
+                len(items) for items in self._notifications.values()
+            )
+            self._notifications.clear()
+            self._close_result = WorkerCloseResult(
+                len(active),
+                cancelled,
+                cleared_notifications,
+            )
+            return self._close_result
 
     def _require_record(self, task_id: str) -> _WorkerRecord:
         record = self._records.get(task_id)

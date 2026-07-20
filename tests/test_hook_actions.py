@@ -118,6 +118,28 @@ async def test_http_non_2xx_and_subagent_are_stable_errors(
     assert subagent_error.value.code == "hook_subagent_unavailable"
 
 
+async def test_subagent_action_uses_bound_runner(tmp_path: Path) -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def launch(task: str, context: str) -> None:
+        calls.append((task, context))
+
+    runner = HookActionRunner(
+        project_root=tmp_path.resolve(),
+        prompt_sink=RecordingPromptSink(),
+        subagent_runner=launch,
+    )
+    action = runner.prepare(
+        SubagentHookAction("inspect ${event.name}", "recent"),
+        {"event.name": "round.started"},
+    )
+
+    await runner.execute(action, event_sequence=1, rule_id="subagent")
+    await runner.close()
+
+    assert calls == [("inspect round.started", "recent")]
+
+
 async def test_shell_success_and_failure_are_isolated(tmp_path: Path) -> None:
     runner = HookActionRunner(
         project_root=tmp_path.resolve(),

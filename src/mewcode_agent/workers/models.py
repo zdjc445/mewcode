@@ -358,3 +358,21 @@ class WorkerNotification:
             "result": self.result,
             "error_code": self.error_code,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerCloseResult:
+    active_tasks: int
+    cancelled_tasks: int
+    cleared_notifications: int
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int or value < 0
+            for value in (
+                self.active_tasks,
+                self.cancelled_tasks,
+                self.cleared_notifications,
+            )
+        ):
+            raise ValueError("Worker close 统计必须是非负整数")

@@ -175,6 +175,31 @@ async def test_shared_activation_pins_hot_reloaded_sop_and_intersects_tools(
 
 
 @pytest.mark.asyncio
+async def test_fork_current_clones_active_state_without_mutating_parent(
+    tmp_path: Path,
+) -> None:
+    runtime, _registry, _prompt_runtime, _skills_root = make_runtime(tmp_path)
+    await runtime.load("alpha", "parent args")
+    child_prompt_runtime = make_prompt_runtime()
+
+    child = runtime.fork_current(child_prompt_runtime)
+    await child.load("beta", "child only")
+
+    assert [item.definition.name for item in runtime.active_skills] == [
+        "alpha"
+    ]
+    assert [item.definition.name for item in child.active_skills] == [
+        "alpha",
+        "beta",
+    ]
+    child_controls = "\n".join(
+        item.content for item in child_prompt_runtime.timeline()
+    )
+    assert "parent args" in child_controls
+    assert "child only" in child_controls
+
+
+@pytest.mark.asyncio
 async def test_load_skill_tool_uses_exact_name_and_reset_clears_activation(
     tmp_path: Path,
 ) -> None:

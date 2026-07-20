@@ -171,3 +171,36 @@ async def test_cancel_marks_task_terminal_even_before_runner_starts() -> None:
     assert snapshot.state == "cancelled"
     assert snapshot.error_code == "worker_cancelled"
     await manager.close()
+
+
+async def test_close_is_idempotent_and_clears_notifications() -> None:
+    release = asyncio.Event()
+
+    async def runner(worker_spec, _usage):
+        if worker_spec.task_id == "3" * 32:
+            return WorkerExecutionOutcome("done", True)
+        await release.wait()
+        return WorkerExecutionOutcome("late", True)
+
+    manager = WorkerManager(WorkerRuntimeConfig(), runner)
+    await manager.start(
+        spec("3" * 32),
+        background=True,
+        transition="explicit",
+    )
+    await manager.start(
+        spec("4" * 32),
+        background=True,
+        transition="explicit",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    first = await manager.close()
+    second = await manager.close()
+
+    assert first == second
+    assert first.active_tasks == 1
+    assert first.cleared_notifications >= 1
+    assert (await manager.get("4" * 32)).state == "cancelled"
+    assert await manager.take_notifications("session-a") == ()
