@@ -4,11 +4,11 @@
 
 | 字段 | 实际值 |
 | --- | --- |
-| 时间 | `2026-07-21T01:17:05.3299747+08:00` |
+| 时间 | `2026-07-21T01:25:52.3049278+08:00` |
 | 分支 | `master` |
-| 验收代码基线 Commit | `13dae00b932d337fdbd937e69ed077bbbff458b4` |
+| 验收代码基线 Commit | `66cd816f4ecaabfa377aff8f9b00b4fe49d52fbd` |
 | 真实 API 条件 | `DEEPSEEK_API_KEY` 未设置 |
-| 代码状态 | 本验收记录与补充 shell 取消收尾测试尚未提交，其余 Chapter 10 代码与文档已提交并推送 |
+| 代码状态 | 本验收记录修正尚未提交，其余 Chapter 10 代码、测试与文档已提交并推送 |
 
 ## 分批提交记录
 
@@ -17,13 +17,15 @@
 | `256bbcd` | Chapter 10 声明式 Hook 规格 |
 | `c96df81` | Hook 模型、严格两层 loader、matcher、模板、四类动作和运行引擎 |
 | `13dae00` | Agent/会话/压缩/工具/CLI 生命周期集成、README 与回归测试 |
+| `2e7d734` | Chapter 10 验收记录与 shell 取消收尾测试 |
+| `66cd816` | 修正可选 condition、all/any 组合和缺失模板变量契约 |
 
 ## 自动化结果
 
 | 检查 | 实际结果 |
 | --- | --- |
-| `.venv\Scripts\python.exe -m pytest -q -rs` | `777 passed, 4 skipped in 23.43s`，exit code `0` |
-| Hook/Agent/压缩/命令/CLI 聚焦测试 | `94 passed in 14.04s`，exit code `0` |
+| `.venv\Scripts\python.exe -m pytest -q -rs` | `780 passed, 4 skipped in 23.88s`，exit code `0` |
+| Hook/Agent/CLI 聚焦测试 | `95 passed in 14.01s`，exit code `0` |
 | `.venv\Scripts\python.exe -m compileall -q src tests integration_tests` | exit code `0` |
 | `git diff --check` | exit code `0`；只有 Git 的 LF→CRLF 工作区提示 |
 | `uv build --wheel` | 成功生成 `mewcode_agent-0.1.0-py3-none-any.whl` |
@@ -41,8 +43,9 @@
 - 项目规则按声明顺序先执行，并完整覆盖同 ID 用户规则；同层重复 ID、无效事件、非法 action/matcher/intercept 组合在启动时 fail-fast；
 - 配置错误定位到精确层级和 `rules[index].field`，不包含 shell command、Prompt、HTTP 数据或工具参数正文；
 - matcher 使用相同 `{kind, pattern}` 结构，类型敏感 `exact`、大小写敏感 `glob`、完整值 `regex` 和最大八层递归 `not` 均有边界测试；
-- 多字段条件隐式 AND，缺失字段即不匹配；`not` 不会把缺失字段变成成功；字段和工具参数键不转换大小写、不猜测别名；
-- `${...}` 支持字符串原文和紧凑 JSON 值；未知字段、非法路径、未闭合占位符和不可序列化值隔离为稳定错误；
+- condition 可省略表示无条件触发；存在时必须且只能选择非空 `all` 或 `any`，混用和空组在加载时拒绝；
+- 缺失条件字段在当前位置固定为 false；`not` 不会把缺失字段变成成功；字段和工具参数键不转换大小写、不猜测别名；
+- `${...}` 支持字符串原文和紧凑 JSON 值；未知字段逐个替换为空字符串，非法路径、未闭合占位符和不可序列化值保持严格边界；
 - `file.path` 只在工具参数 JSON object 含精确字符串键 `path` 时生成，不从其他键推断；
 - shell 动作固定使用项目 cwd，Windows 通过 PowerShell、POSIX 通过 `/bin/sh`；成功、非零退出、取消终止和超时错误边界已覆盖；
 - HTTP 动作使用共享 `httpx.AsyncClient`、绝对 HTTP(S) URL、模板 header/body、禁止重定向和 2xx 判定；响应正文不进入模型；
