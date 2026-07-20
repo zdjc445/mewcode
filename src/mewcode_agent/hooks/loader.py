@@ -12,6 +12,7 @@ from mewcode_agent.hooks.models import (
     HOOK_EVENT_NAMES,
     HookAction,
     HookConfigError,
+    HookCondition,
     HookConfiguration,
     HookInterception,
     HookRule,
@@ -97,6 +98,27 @@ def _parse_matchers(
         )
         for path, matcher in data.items()
     }
+
+
+def _parse_condition(
+    raw: Any,
+    *,
+    location: str,
+) -> HookCondition:
+    data = _mapping(raw, location=location)
+    if set(data) not in ({"all"}, {"any"}):
+        raise HookConfigError(
+            f"{location} 必须且只能包含 all 或 any"
+        )
+    mode = next(iter(data))
+    matchers = _parse_matchers(
+        data[mode],
+        location=f"{location}.{mode}",
+    )
+    try:
+        return HookCondition(mode, matchers)
+    except ValueError as exc:
+        raise HookConfigError(f"{location} 无效: {exc}") from exc
 
 
 def _non_empty_string(value: Any, *, location: str) -> str:
@@ -215,14 +237,12 @@ def _parse_rule(
     data = _mapping(raw, location=location)
     require_exact_keys(
         data,
-        required={
-            "id",
-            "event",
+        required={"id", "event", "action"},
+        optional={
+            "condition",
             "once",
             "async",
             "timeout_seconds",
-            "match",
-            "action",
             "intercept",
         },
         location=location,
@@ -234,19 +254,23 @@ def _parse_rule(
             rule_id=data["id"],
             source=source,
             event=data["event"],
-            once=data["once"],
-            run_async=data["async"],
-            timeout_seconds=data["timeout_seconds"],
-            matchers=_parse_matchers(
-                data["match"],
-                location=f"{location}.match",
+            once=data.get("once", False),
+            run_async=data.get("async", False),
+            timeout_seconds=data.get("timeout_seconds", 30),
+            condition=(
+                _parse_condition(
+                    data["condition"],
+                    location=f"{location}.condition",
+                )
+                if "condition" in data
+                else None
             ),
             action=_parse_action(
                 data["action"],
                 location=f"{location}.action",
             ),
             interception=_parse_interception(
-                data["intercept"],
+                data.get("intercept"),
                 location=f"{location}.intercept",
             ),
         )

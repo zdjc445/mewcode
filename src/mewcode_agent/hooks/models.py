@@ -28,6 +28,7 @@ HookEventName: TypeAlias = Literal[
     "tool.after_execute",
 ]
 HookMatcherKind: TypeAlias = Literal["exact", "glob", "regex", "not"]
+HookConditionMode: TypeAlias = Literal["all", "any"]
 HookActionType: TypeAlias = Literal["shell", "prompt", "http", "subagent"]
 
 HOOK_EVENT_NAMES: tuple[HookEventName, ...] = (
@@ -120,6 +121,25 @@ class HookInterception:
 
 
 @dataclass(frozen=True, slots=True)
+class HookCondition:
+    mode: HookConditionMode
+    matchers: Mapping[str, HookValueMatcher]
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("all", "any"):
+            raise ValueError("condition mode 无效")
+        if not isinstance(self.matchers, Mapping) or not self.matchers:
+            raise ValueError("condition matchers 必须是非空 mapping")
+        copied = dict(self.matchers)
+        for path, matcher in copied.items():
+            if not isinstance(path, str) or not _IDENTIFIER.fullmatch(path):
+                raise ValueError("matcher 字段路径格式无效")
+            if not isinstance(matcher, HookValueMatcher):
+                raise ValueError("condition matchers 包含无效对象")
+        object.__setattr__(self, "matchers", MappingProxyType(copied))
+
+
+@dataclass(frozen=True, slots=True)
 class HookRule:
     rule_id: str
     source: HookSource
@@ -127,7 +147,7 @@ class HookRule:
     once: bool
     run_async: bool
     timeout_seconds: float
-    matchers: Mapping[str, HookValueMatcher]
+    condition: HookCondition | None
     action: HookAction
     interception: HookInterception | None
 
@@ -152,15 +172,11 @@ class HookRule:
         ):
             raise ValueError("rule timeout_seconds 必须大于 0 且不超过 300")
         object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
-        if not isinstance(self.matchers, Mapping):
-            raise ValueError("rule matchers 必须是 mapping")
-        copied = dict(self.matchers)
-        for path, matcher in copied.items():
-            if not isinstance(path, str) or not _IDENTIFIER.fullmatch(path):
-                raise ValueError("matcher 字段路径格式无效")
-            if not isinstance(matcher, HookValueMatcher):
-                raise ValueError("rule matchers 包含无效对象")
-        object.__setattr__(self, "matchers", MappingProxyType(copied))
+        if self.condition is not None and not isinstance(
+            self.condition,
+            HookCondition,
+        ):
+            raise ValueError("rule condition 无效")
         if not isinstance(
             self.action,
             (

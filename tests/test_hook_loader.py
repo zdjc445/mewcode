@@ -23,20 +23,24 @@ def rule_yaml(
     *,
     event: str = "tool.before_execute",
     action: str | None = None,
-    match: str = "{}",
+    condition: str | None = None,
     run_async: str = "false",
     intercept: str = "null",
 ) -> str:
     action = action or """type: shell
       command: "echo ${tool.name}"
       cwd: project"""
+    condition_yaml = (
+        ""
+        if condition is None
+        else f"    condition:{condition}\n"
+    )
     return f"""  - id: {rule_id}
     event: {event}
     once: false
     async: {run_async}
     timeout_seconds: 10
-    match: {match}
-    action:
+{condition_yaml}    action:
       {action}
     intercept: {intercept}
 """
@@ -53,6 +57,63 @@ def test_missing_hook_layers_are_empty(tmp_path: Path) -> None:
     )
 
     assert loaded.rules == ()
+
+
+def test_condition_and_execution_controls_are_optional(tmp_path: Path) -> None:
+    user = tmp_path / "user.yaml"
+    write(
+        user,
+        """version: 1
+rules:
+  - id: minimal
+    event: system.startup
+    action:
+      type: shell
+      command: exit 0
+      cwd: project
+""",
+    )
+
+    loaded = load_hook_configuration(
+        user_path=user,
+        project_path=tmp_path / "project.yaml",
+    )
+
+    rule = loaded.rules[0]
+    assert rule.condition is None
+    assert rule.once is False
+    assert rule.run_async is False
+    assert rule.timeout_seconds == 30
+    assert rule.interception is None
+
+
+def test_condition_requires_exactly_one_nonempty_all_or_any(
+    tmp_path: Path,
+) -> None:
+    user = tmp_path / "user.yaml"
+    write(
+        user,
+        config(
+            rule_yaml(
+                "mixed",
+                condition="""
+      all:
+        tool.name:
+          kind: exact
+          pattern: write_file
+      any:
+        file.path:
+          kind: glob
+          pattern: 'src/**'""",
+            )
+        ),
+    )
+
+    with pytest.raises(HookConfigError, match="只能包含 all 或 any"):
+        load_hook_configuration(
+            user_path=user,
+            project_path=tmp_path / "project.yaml",
+        )
 
 
 def test_project_rules_run_first_and_override_same_user_id(
@@ -111,12 +172,13 @@ def test_loads_all_four_action_types_and_recursive_not_matcher(
                 action="""type: subagent
       task: "inspect ${file.path}"
       context: recent""",
-                match="""
-      file.path:
-        kind: not
-        pattern:
-          kind: regex
-          pattern: '.*\\.tmp'""",
+                condition="""
+      all:
+        file.path:
+          kind: not
+          pattern:
+            kind: regex
+            pattern: '.*\\.tmp'""",
             ),
         ),
     )
@@ -130,7 +192,8 @@ def test_loads_all_four_action_types_and_recursive_not_matcher(
     assert isinstance(loaded.rules[1].action, PromptHookAction)
     assert isinstance(loaded.rules[2].action, HttpHookAction)
     assert isinstance(loaded.rules[3].action, SubagentHookAction)
-    matcher = loaded.rules[3].matchers["file.path"]
+    assert loaded.rules[3].condition is not None
+    matcher = loaded.rules[3].condition.matchers["file.path"]
     assert matcher.kind == "not"
     assert matcher.pattern.kind == "regex"  # type: ignore[union-attr]
 
@@ -154,13 +217,14 @@ def test_loads_all_four_action_types_and_recursive_not_matcher(
             config(
                 rule_yaml(
                     "bad_regex",
-                    match="""
-      tool.name:
-        kind: regex
-        pattern: '['""",
+                    condition="""
+      all:
+        tool.name:
+          kind: regex
+          pattern: '['""",
                 )
             ),
-            "match.tool.name.pattern",
+            "condition.all.tool.name.pattern",
         ),
         (
             config(

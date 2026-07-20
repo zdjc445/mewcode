@@ -128,15 +128,16 @@ rules:
     once: false
     async: true
     timeout_seconds: 10
-    match:
-      tool.name:
-        kind: exact
-        pattern: write_file
-      file.path:
-        kind: not
-        pattern:
-          kind: glob
-          pattern: ".git/**"
+    condition:
+      all:
+        tool.name:
+          kind: exact
+          pattern: write_file
+        file.path:
+          kind: not
+          pattern:
+            kind: glob
+            pattern: ".git/**"
     action:
       type: http
       method: POST
@@ -147,7 +148,7 @@ rules:
     intercept: null
 ```
 
-事件名固定覆盖 `system.*`、`context.*`、`session.*`、`round.*`、`message.*` 和 `tool.*` 生命周期，完整清单与字段见 [`docs/ch10/spec.md`](docs/ch10/spec.md)。条件使用 `{kind, pattern}`，支持类型敏感的 `exact`、大小写敏感的 `glob`、完整值 `regex` 和最大八层递归 `not`；同一规则的所有字段必须同时命中。字段名和工具参数键都按原文精确匹配，不转换大小写或猜测别名。`${...}` 只读取该事件明确提供的上下文字段，未知字段使该次动作失败，不会替换为空字符串。
+事件名固定覆盖 `system.*`、`context.*`、`session.*`、`round.*`、`message.*` 和 `tool.*` 生命周期，完整清单与字段见 [`docs/ch10/spec.md`](docs/ch10/spec.md)。`condition` 可省略表示无条件触发；存在时必须用 `all` 或 `any` 二选一组合非空字段 mapping，不能混用。matcher 使用 `{kind, pattern}`，支持类型敏感的 `exact`、大小写敏感的 `glob`、完整值 `regex` 和最大八层递归 `not`。字段名和工具参数键都按原文精确匹配，不转换大小写或猜测别名。`${...}` 只读取该事件明确提供的上下文字段，未知字段逐个替换为空字符串。
 
 动作支持：
 

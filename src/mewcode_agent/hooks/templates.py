@@ -42,7 +42,7 @@ def render_template(template: str, context: Mapping[str, Any]) -> str:
     def replace(match: re.Match[str]) -> str:
         path = match.group(1)
         if path not in context:
-            raise HookTemplateError("模板引用的上下文字段不存在")
+            return ""
         value = context[path]
         if isinstance(value, str):
             return value

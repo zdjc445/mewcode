@@ -70,11 +70,13 @@ def require_exact_keys(
     data: Mapping[str, Any],
     *,
     required: set[str],
+    optional: set[str] | None = None,
     location: str,
 ) -> None:
+    optional = optional or set()
     actual = set(data)
     missing = sorted(required - actual)
-    unknown = sorted(actual - required)
+    unknown = sorted(actual - required - optional)
     if missing:
         raise HookConfigError(f"{location} 缺少字段: {', '.join(missing)}")
     if unknown:

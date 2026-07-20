@@ -7,7 +7,7 @@ from fnmatch import fnmatchcase
 import re
 from typing import Any
 
-from mewcode_agent.hooks.models import HookValueMatcher
+from mewcode_agent.hooks.models import HookCondition, HookValueMatcher
 
 
 def matcher_matches(matcher: HookValueMatcher, value: Any) -> bool:
@@ -25,13 +25,23 @@ def matcher_matches(matcher: HookValueMatcher, value: Any) -> bool:
     return re.fullmatch(matcher.pattern, value) is not None
 
 
-def rule_matches(
-    matchers: Mapping[str, HookValueMatcher],
+def condition_matches(
+    condition: HookCondition,
     context: Mapping[str, Any],
 ) -> bool:
-    for path, matcher in matchers.items():
-        if path not in context:
-            return False
-        if not matcher_matches(matcher, context[path]):
-            return False
-    return True
+    results = (
+        path in context and matcher_matches(matcher, context[path])
+        for path, matcher in condition.matchers.items()
+    )
+    if condition.mode == "all":
+        return all(results)
+    return any(results)
+
+
+def rule_matches(
+    condition: HookCondition | None,
+    context: Mapping[str, Any],
+) -> bool:
+    if condition is None:
+        return True
+    return condition_matches(condition, context)

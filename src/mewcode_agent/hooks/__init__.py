@@ -12,12 +12,18 @@ from mewcode_agent.hooks.integration import (
     PromptHookBridge,
 )
 from mewcode_agent.hooks.loader import load_hook_configuration
-from mewcode_agent.hooks.matching import matcher_matches, rule_matches
+from mewcode_agent.hooks.matching import (
+    condition_matches,
+    matcher_matches,
+    rule_matches,
+)
 from mewcode_agent.hooks.models import (
     HOOK_EVENT_NAMES,
     HookAction,
     HookActionType,
     HookCloseResult,
+    HookCondition,
+    HookConditionMode,
     HookConfigError,
     HookConfiguration,
     HookDiagnostic,
@@ -45,6 +51,8 @@ __all__ = [
     "HookActionRunner",
     "HookActionType",
     "HookCloseResult",
+    "HookCondition",
+    "HookConditionMode",
     "HookConfigError",
     "HookConfiguration",
     "HookDiagnostic",
@@ -65,6 +73,7 @@ __all__ = [
     "ShellHookAction",
     "SubagentHookAction",
     "load_hook_configuration",
+    "condition_matches",
     "matcher_matches",
     "render_template",
     "rule_matches",

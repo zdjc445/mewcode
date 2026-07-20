@@ -4,6 +4,7 @@ from typing import Any
 
 from mewcode_agent.hooks import (
     HookConfiguration,
+    HookCondition,
     HookDiagnostic,
     HookEngine,
     HookInterception,
@@ -57,7 +58,10 @@ def make_rule(
         once,
         run_async,
         1,
-        {"tool.name": HookValueMatcher("exact", "write_file")},
+        HookCondition(
+            "all",
+            {"tool.name": HookValueMatcher("exact", "write_file")},
+        ),
         ShellHookAction(command),
         interception,
     )
@@ -176,7 +180,7 @@ async def test_close_dispatches_shutdown_once_and_is_idempotent(
         False,
         False,
         1,
-        {},
+        None,
         ShellHookAction("shutdown"),
         None,
     )

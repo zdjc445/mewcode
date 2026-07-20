@@ -1,7 +1,7 @@
 import pytest
 
 from mewcode_agent.hooks import (
-    HookTemplateError,
+    HookCondition,
     HookValueMatcher,
     matcher_matches,
     render_template,
@@ -30,7 +30,7 @@ def test_not_reverses_child_but_missing_context_never_matches() -> None:
 
     assert matcher_matches(matcher, "main.py")
     assert not matcher_matches(matcher, "cache.tmp")
-    assert not rule_matches({"file.path": matcher}, {})
+    assert not rule_matches(HookCondition("all", {"file.path": matcher}), {})
 
 
 def test_rule_match_uses_all_fields() -> None:
@@ -39,20 +39,36 @@ def test_rule_match_uses_all_fields() -> None:
         "tool.name": HookValueMatcher("regex", "(?:write|edit)_file"),
     }
 
+    condition = HookCondition("all", matchers)
     assert rule_matches(
-        matchers,
+        condition,
         {
             "event.name": "tool.before_execute",
             "tool.name": "write_file",
         },
     )
     assert not rule_matches(
-        matchers,
+        condition,
         {
             "event.name": "tool.before_execute",
             "tool.name": "read_file",
         },
     )
+
+
+def test_any_condition_matches_when_exactly_one_field_matches() -> None:
+    condition = HookCondition(
+        "any",
+        {
+            "tool.name": HookValueMatcher("exact", "write_file"),
+            "file.path": HookValueMatcher("glob", "docs/**"),
+        },
+    )
+
+    assert rule_matches(condition, {"tool.name": "write_file"})
+    assert rule_matches(condition, {"file.path": "docs/spec.md"})
+    assert not rule_matches(condition, {"tool.name": "read_file"})
+    assert rule_matches(None, {})
 
 
 def test_template_renders_strings_and_compact_json_values() -> None:
@@ -68,9 +84,8 @@ def test_template_renders_strings_and_compact_json_values() -> None:
     assert rendered == '原文|3|{"ok":true}'
 
 
-def test_template_missing_field_and_invalid_syntax_are_distinct() -> None:
-    with pytest.raises(HookTemplateError):
-        render_template("${file.path}", {})
+def test_template_missing_field_becomes_empty_and_syntax_is_strict() -> None:
+    assert render_template("path=${file.path}", {}) == "path="
     with pytest.raises(ValueError, match="无效上下文字段"):
         validate_template("${File.Path}")
     with pytest.raises(ValueError, match="未闭合"):

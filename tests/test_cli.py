@@ -269,7 +269,6 @@ rules:
     once: false
     async: false
     timeout_seconds: 10
-    match: {}
     action:
       type: shell
       command: echo secret-command

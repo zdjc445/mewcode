@@ -119,7 +119,7 @@ class HookEngine:
             if rule.once and rule.rule_id in self._once_consumed:
                 continue
             try:
-                matched = rule_matches(rule.matchers, context)
+                matched = rule_matches(rule.condition, context)
             except Exception:
                 self._rule_diagnostic(
                     rule,
@@ -139,8 +139,8 @@ class HookEngine:
             except HookTemplateError:
                 self._rule_diagnostic(
                     rule,
-                    "hook_template_field_missing",
-                    "Hook 模板字段不存在",
+                    "hook_template_render_failed",
+                    "Hook 模板渲染失败",
                 )
             except HookActionError as exc:
                 self._rule_diagnostic(rule, exc.code, exc.message)
@@ -158,11 +158,13 @@ class HookEngine:
                         rule.interception.reason,
                         context,
                     )
+                    if not block_reason.strip():
+                        block_reason = "工具调用被 Hook 规则拒绝"
                 except HookTemplateError:
                     self._rule_diagnostic(
                         rule,
-                        "hook_template_field_missing",
-                        "Hook 拦截原因模板字段不存在",
+                        "hook_template_render_failed",
+                        "Hook 拦截原因模板渲染失败",
                     )
                     block_reason = "工具调用被 Hook 规则拒绝"
 

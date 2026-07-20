@@ -13,9 +13,9 @@
 2. 两层文件都使用 UTF-8 严格 YAML；缺失文件表示该层没有规则，不自动创建文件。
 3. 项目级规则优先于用户级规则；同一精确 `id` 的项目规则完整覆盖用户规则，不做字段合并。
 4. 生效规则先按来源优先级排列，再保持所在文件中的声明顺序。
-5. 规则由精确事件名、`match` 条件、单个 `action`、执行方式、超时和可选工具拦截组成。
-6. 条件沿用权限规则的 `{kind, pattern}` 形态，并支持 `exact`、`glob`、`regex` 与递归 `not`。
-7. 模板占位符固定使用 `${context.path}`；未知字段是该次动作错误，不替换为空字符串，也不回显敏感上下文。
+5. 规则只有 `id`、精确事件名和单个 `action` 必填；`condition` 可省略，表示无条件触发。
+6. 条件沿用权限规则的 `{kind, pattern}` 形态，支持 `exact`、`glob`、`regex` 与递归 `not`；多字段必须用 `all` 或 `any` 二选一，不允许混用。
+7. 模板占位符固定使用 `${context.path}`；未知字段逐个替换为空字符串，不视为错误，也不回显其他上下文。
 8. `once: true` 表示当前应用进程生命周期最多成功进入一次动作调度；新会话不重置。
 9. `async: true` 的动作进入后台任务集合，不阻塞 Agent；Prompt 注入和工具拦截禁止异步执行。
 10. 工具执行前事件可以返回声明式拒绝；工具执行后事件只能观察结果，不能改写 `ToolResult`。
@@ -72,10 +72,11 @@ rules:
     once: false
     async: true
     timeout_seconds: 10
-    match:
-      tool.name:
-        kind: exact
-        pattern: write_file
+    condition:
+      all:
+        tool.name:
+          kind: exact
+          pattern: write_file
     action:
       type: shell
       command: "python scripts/audit.py ${tool.name} ${file.path}"
@@ -92,16 +93,21 @@ rules:
 
 ### 4.2 规则字段
 
-每条规则只允许且必须包含：
+每条规则只允许以下字段，其中必填字段是：
 
 ```text
 id
 event
+action
+```
+
+可选字段是：
+
+```text
+condition
 once
 async
 timeout_seconds
-match
-action
 intercept
 ```
 
@@ -109,12 +115,12 @@ intercept
 | --- | --- |
 | `id` | 完整匹配 `[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*` |
 | `event` | 第 5 节列出的精确事件名之一 |
-| `once` | 精确 bool |
-| `async` | 精确 bool |
-| `timeout_seconds` | 大于 `0` 且不超过 `300` 的有限整数或浮点数，bool 无效 |
-| `match` | 字段名到 matcher 的 mapping；空 mapping 表示无条件匹配 |
+| `condition` | 省略，或只包含一个非空 `all`/`any` mapping |
+| `once` | 精确 bool；默认 `false` |
+| `async` | 精确 bool；默认 `false` |
+| `timeout_seconds` | 大于 `0` 且不超过 `300` 的有限整数或浮点数，bool 无效；默认 `30` |
 | `action` | 第 8 节中的一个严格动作 mapping |
-| `intercept` | `null` 或第 9 节的严格拦截 mapping |
+| `intercept` | 省略、`null` 或第 9 节的严格拦截 mapping；默认 `null` |
 
 同一层内 `id` 重复使该层配置无效。完成单层校验后，以用户规则为底、项目规则为覆盖层；项目中的同 ID 规则完整替换用户规则，并出现在项目规则的声明位置。最终执行顺序固定为：全部项目生效规则按声明顺序，然后是未被覆盖的用户规则按声明顺序。
 
@@ -176,23 +182,29 @@ session.id
 
 ## 7. 条件匹配
 
-### 7.1 `match` 结构
+### 7.1 `condition` 结构
 
 示例：
 
 ```yaml
-match:
-  tool.name:
-    kind: regex
-    pattern: "(?:write|edit)_file"
-  file.path:
-    kind: not
-    pattern:
-      kind: glob
-      pattern: ".git/**"
+condition:
+  all:
+    tool.name:
+      kind: regex
+      pattern: "(?:write|edit)_file"
+    file.path:
+      kind: not
+      pattern:
+        kind: glob
+        pattern: ".git/**"
 ```
 
-`match` 的所有顶层字段隐式使用 AND；任一字段不存在或 matcher 返回 false，则规则不匹配。字段名必须完整匹配 `[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*`，按点分段精确读取，不 lower、不做别名、前缀或相似匹配。
+`condition` 可完全省略，表示无条件触发。存在时必须且只能含一个键：
+
+- `all`：所有字段都存在且 matcher 都返回 true 时匹配；
+- `any`：至少一个字段存在且 matcher 返回 true 时匹配。
+
+`all` 与 `any` 的值都必须是非空 mapping；同一 condition 不能同时声明两者，不支持嵌套逻辑组或隐式优先级。字段名必须完整匹配 `[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*`，按点分段精确读取，不 lower、不做别名、前缀或相似匹配。缺失字段在该 matcher 位置固定视为 false，因此 `all` 失败，`any` 仍可由其他字段成功。
 
 ### 7.2 Matcher
 
@@ -219,7 +231,7 @@ pattern:
 
 1. 只有规则匹配后才解析模板和执行动作。
 2. 每个字符串动作字段都支持 `${...}`，占位符路径遵循第 6 节精确字段。
-3. 非字符串上下文值使用紧凑 UTF-8 JSON 序列化；字符串原文插入；缺失字段产生 `hook_template_field_missing`。
+3. 非字符串上下文值使用紧凑 UTF-8 JSON 序列化；字符串原文插入；缺失字段逐个替换为 `""`，不产生诊断。
 4. 模板替换不增加 shell quoting、URL encoding 或 JSON escaping。规则作者必须在动作字段中明确处理目标语法。
 5. 每次动作都由 `asyncio.timeout(timeout_seconds)` 限制；超时产生 `hook_action_timeout`。
 6. 动作结果不写入普通历史。只有 `prompt` 动作的内容进入 Prompt runtime control。
@@ -318,7 +330,7 @@ intercept:
 2. 只有 `event: tool.before_execute` 可以声明非 null intercept。
 3. 拦截规则必须使用 `async: false`。
 4. 匹配后先在同一超时边界执行 action，再声明拒绝；即使 action 失败，声明式拒绝仍然生效。
-5. 拒绝返回 `ToolResult(success=false, error_code="tool_blocked_by_hook")`，`error_message` 使用展开后的 `reason`；缺失模板字段时使用固定脱敏消息。
+5. 拒绝返回 `ToolResult(success=false, error_code="tool_blocked_by_hook")`，`error_message` 使用展开后的 `reason`；缺失模板字段按空字符串替换，若最终 reason 为空白则使用固定脱敏消息。
 6. 命中第一个拦截后停止分发后续 `tool.before_execute` 规则；该拒绝结果仍分发一次 `tool.after_execute`。
 7. Hook 拦截发生在 Chapter 04 安全策略和用户审批之后、实际 ToolRegistry 调用之前；它不能把安全策略拒绝改为允许，也不能绕过 plan-only 审批。
 
@@ -414,7 +426,7 @@ message
 | --- | --- |
 | `hook_context_invalid` | 内部事件上下文不满足模型约束 |
 | `hook_match_failed` | 运行时匹配器失败 |
-| `hook_template_field_missing` | 模板引用不存在字段 |
+| `hook_template_render_failed` | 非缺失字段的模板值无法安全渲染 |
 | `hook_action_timeout` | 动作超过规则超时 |
 | `hook_shell_failed` | shell 启动失败或非零退出 |
 | `hook_http_failed` | HTTP 请求失败或返回非 2xx |
@@ -478,8 +490,8 @@ message
 
 - exact 类型敏感；glob 大小写和完整值；regex fullmatch 与加载时错误；
 - not 递归、深度上限、缺失字段不因 not 成功；
-- 多字段 AND、空 match、点路径精确取值和 arguments 直接键；
-- `${...}` 多次引用、非字符串 JSON、缺失字段和非法占位符；
+- condition 省略、all、any、混用拒绝、空组拒绝、点路径精确取值和 arguments 直接键；
+- `${...}` 多次引用、非字符串 JSON、缺失字段替换为空串和非法占位符；
 - `file.path` 只接受精确 `path` 字符串键。
 
 ### 17.3 动作
@@ -513,8 +525,8 @@ message
 2. 非法 YAML、字段、matcher、action 或组合在启动时给出精确脱敏定位。
 3. 生命周期事件覆盖系统、压缩、会话、round、消息和工具边界。
 4. 上下文精确提供事件、工具、文件、消息与错误字段，不猜测键名。
-5. exact、glob、regex、not 和多字段 AND 按规格匹配。
-6. `${...}` 可用于动作字段，缺失字段隔离为单次诊断。
+5. exact、glob、regex、not 和 condition 的 all/any 二选一按规格匹配。
+6. `${...}` 可用于动作字段，缺失字段逐个替换为空字符串。
 7. shell、Prompt、HTTP 动作真实可用；subagent 使用稳定占位并由 Chapter 11 接管。
 8. 同步动作按序阻塞，异步动作登记运行，once 在进程内至多调度一次。
 9. 工具前置 Hook 可以 deny，不能越过权限策略或把 deny 改为 allow。
