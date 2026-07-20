@@ -9,7 +9,6 @@ from mewcode_agent.agent.usage import NoteUsageRecord, UsageCollector
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.notes.models import (
     NoteClearTarget,
-    NoteCommand,
     NotePaths,
     NoteScope,
     NoteWarning,
@@ -24,20 +23,6 @@ from mewcode_agent.providers.base import ProviderUsageResult
 
 NOTES_TRIGGER_REQUESTS = 5
 NOTES_EXIT_TIMEOUT_SECONDS = 120.0
-
-
-def parse_note_command(value: str) -> NoteCommand | None:
-    if not isinstance(value, str):
-        raise TypeError("value 必须是字符串")
-    normalized = value.strip()
-    mapping = {
-        "/notes": "show",
-        "/notes paths": "paths",
-        "/notes clear user": "clear_user",
-        "/notes clear project": "clear_project",
-    }
-    kind = mapping.get(normalized)
-    return NoteCommand(kind) if kind is not None else None  # type: ignore[arg-type]
 
 
 class NotesManager:
@@ -283,12 +268,34 @@ class NotesManager:
         if task is not None:
             await asyncio.shield(task)
 
+    async def flush_before_session_switch(self) -> None:
+        await self.wait_until_idle()
+        if self.unprocessed_successes <= 0:
+            return
+        self._last_attempt_successes = self._total_successes
+        self._task = asyncio.create_task(self._run_updates())
+        task = self._task
+        try:
+            async with asyncio.timeout(self._exit_timeout_seconds):
+                await task
+        except TimeoutError:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            self._warn(None, NotesError("notes_update_failed"))
+
     def reload_for_session(self) -> tuple[RuntimeInstruction, ...]:
         if self._task is not None and not self._task.done():
             raise NotesError("notes_read_failed")
         snapshot = load_notes(paths=self._paths)
         self._snapshot = snapshot
+        self._total_successes = 0
+        self._processed_successes = 0
+        self._last_attempt_successes = 0
         self._last_success_history_end = 0
+        self._pending = False
         return snapshot.runtime_controls(generation=self._generation)
 
     async def flush_on_exit(self) -> None:

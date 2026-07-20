@@ -12,6 +12,7 @@ from mewcode_agent.compaction.models import (
     CompactionConfig,
     ContextCompactionError,
     ContextEstimate,
+    ContextStatus,
     SummaryCheckpoint,
     SummarySections,
     ToolCompactionResult,
@@ -529,6 +530,34 @@ class ContextWindowManager:
         result: ProviderUsageResult,
     ) -> None:
         self._estimator.record_usage(self._provider, request, result)
+
+    def inspect_status(
+        self,
+        frame: PromptFrame,
+        *,
+        tools: tuple[dict[str, Any], ...] | None,
+    ) -> ContextStatus:
+        projected = self._projector.project(
+            frame,
+            self._checkpoint,
+            active_request_sequence=None,
+            active_round_number=None,
+        )
+        estimate = self._estimator.estimate(
+            self._provider,
+            ProviderRequest(projected.system_prompt, projected.items, tools),
+        )
+        checkpoint = self._checkpoint
+        return ContextStatus(
+            estimate.estimated_prompt_tokens,
+            estimate.used_actual_baseline,
+            self._prompt_budget_tokens,
+            self._auto_trigger_tokens,
+            checkpoint.generation if checkpoint is not None else 0,
+            checkpoint.covered_history_end if checkpoint is not None else 0,
+            self._consecutive_summary_failures,
+            self._auto_compaction_disabled,
+        )
 
     def reset_session(self) -> None:
         if self._summary_lock.locked():

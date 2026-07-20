@@ -19,7 +19,6 @@ from mewcode_agent.notes import (
     NotesSnapshot,
     load_notes,
     note_paths,
-    parse_note_command,
     write_note_scope,
 )
 from mewcode_agent.notes import manager as manager_module
@@ -311,6 +310,31 @@ async def test_exit_flushes_one_unprocessed_success(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_switch_flushes_pending_without_closing_manager(
+    tmp_path: Path,
+) -> None:
+    updater = StubUpdater(
+        [
+            NotesSnapshot(user_preferences=("switch",)),
+            NotesSnapshot(user_preferences=("later",)),
+        ]
+    )
+    manager, history, _runtime = make_manager(tmp_path, updater)
+    add_success(manager, history, 0)
+
+    await manager.flush_before_session_switch()
+
+    assert updater.calls == 1
+    assert manager.unprocessed_successes == 0
+    manager.reload_for_session()
+    for index in range(5):
+        add_success(manager, history, index + 1)
+    await manager.wait_until_idle()
+    assert updater.calls == 2
+    assert manager.snapshot.user_preferences == ("later",)
+
+
+@pytest.mark.asyncio
 async def test_exit_without_success_does_not_call_updater(tmp_path: Path) -> None:
     updater = StubUpdater([])
     manager, _history, _runtime = make_manager(tmp_path, updater)
@@ -386,32 +410,3 @@ def test_reload_for_session_reads_manual_changes_and_resets_controls(
     assert [control.instruction_id for control in controls] == [
         "runtime.notes.project.generation_1"
     ]
-
-
-@pytest.mark.parametrize(
-    ("text", "kind"),
-    [
-        (" /notes ", "show"),
-        ("/notes paths", "paths"),
-        ("/notes clear user", "clear_user"),
-        ("/notes clear project", "clear_project"),
-    ],
-)
-def test_parse_exact_note_commands(text: str, kind: str) -> None:
-    command = parse_note_command(text)
-    assert command is not None and command.kind == kind
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "/Notes",
-        "/notes extra",
-        "/notes  paths",
-        "/notes clear",
-        "/notes clear User",
-        "/notes clear user extra",
-    ],
-)
-def test_non_exact_note_commands_are_ordinary_text(text: str) -> None:
-    assert parse_note_command(text) is None

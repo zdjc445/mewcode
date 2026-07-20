@@ -13,7 +13,6 @@ from mewcode_agent.sessions import (
     SessionJournal,
     SessionManager,
     SessionMeta,
-    parse_session_command,
 )
 
 ACTIVE_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -43,46 +42,6 @@ def create_session(
     )
     journal.append(ChatMessage(role="user", content=content))
     return journal
-
-
-@pytest.mark.parametrize(
-    ("text", "kind", "session_id"),
-    [
-        (" /sessions ", "list", None),
-        (f"/resume {TARGET_ID}", "resume", TARGET_ID),
-        (f"/session path {TARGET_ID}", "path", TARGET_ID),
-        (f"/session delete {TARGET_ID}", "delete", TARGET_ID),
-    ],
-)
-def test_parse_exact_session_commands(
-    text: str,
-    kind: str,
-    session_id: str | None,
-) -> None:
-    command = parse_session_command(text)
-
-    assert command is not None
-    assert command.kind == kind
-    assert command.session_id == session_id
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "/Sessions",
-        "/sessions extra",
-        "/resume",
-        f"/resume  {TARGET_ID}",
-        f"/Resume {TARGET_ID}",
-        "/resume BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-        "/resume bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        f"/session path {TARGET_ID} extra",
-        f"/session  delete {TARGET_ID}",
-        "/session delete",
-    ],
-)
-def test_non_exact_session_commands_are_ordinary_text(text: str) -> None:
-    assert parse_session_command(text) is None
 
 
 def test_manager_starts_lazy_without_creating_or_cleaning_sessions(
@@ -254,6 +213,73 @@ def test_activation_failure_rolls_back_history_and_active_journal(
     assert history.snapshot() == [ChatMessage(role="user", content="current")]
     history.add_assistant("still writable")
     assert len(history) == 2
+
+
+def test_start_new_preserves_old_session_and_opens_lazy_empty_history(
+    tmp_path: Path,
+) -> None:
+    generated_ids = iter((ACTIVE_ID, SECOND_ID))
+    sessions_root = tmp_path / "sessions"
+    history = ConversationHistory()
+    manager = SessionManager(
+        sessions_root=sessions_root,
+        project_root=tmp_path,
+        provider_id="provider",
+        model="model",
+        history=history,
+        id_factory=lambda: next(generated_ids),
+        now_factory=fixed_now,
+    )
+    history.add_user("preserved")
+    old_directory = sessions_root / ACTIVE_ID
+    messages_before = (old_directory / "messages.jsonl").read_bytes()
+    meta_before = (old_directory / "meta.json").read_bytes()
+    activations: list[str] = []
+
+    session_id = manager.start_new(
+        activate=lambda: activations.append("activated")
+    )
+
+    assert session_id == SECOND_ID
+    assert manager.active_session_id == SECOND_ID
+    assert history.snapshot() == []
+    assert not (sessions_root / SECOND_ID).exists()
+    assert (old_directory / "messages.jsonl").read_bytes() == messages_before
+    assert (old_directory / "meta.json").read_bytes() == meta_before
+    assert activations == ["activated"]
+
+
+def test_start_new_activation_failure_rolls_back_without_deleting_history(
+    tmp_path: Path,
+) -> None:
+    generated_ids = iter((ACTIVE_ID, SECOND_ID))
+    sessions_root = tmp_path / "sessions"
+    history = ConversationHistory()
+    manager = SessionManager(
+        sessions_root=sessions_root,
+        project_root=tmp_path,
+        provider_id="provider",
+        model="model",
+        history=history,
+        id_factory=lambda: next(generated_ids),
+        now_factory=fixed_now,
+    )
+    history.add_user("preserved")
+
+    with pytest.raises(SessionError) as captured:
+        manager.start_new(
+            activate=lambda: (_ for _ in ()).throw(
+                RuntimeError("SECRET_ACTIVATION")
+            )
+        )
+
+    assert captured.value.code == "session_switch_failed"
+    assert "SECRET_ACTIVATION" not in str(captured.value)
+    assert manager.active_session_id == ACTIVE_ID
+    assert history.snapshot() == [ChatMessage(role="user", content="preserved")]
+    history.add_assistant("continued")
+    assert len(history) == 2
+    assert not (sessions_root / SECOND_ID).exists()
 
 
 def test_resume_gap_is_injected_at_exact_seven_day_boundary(

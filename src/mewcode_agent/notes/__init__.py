@@ -2,8 +2,6 @@
 
 from mewcode_agent.notes.models import (
     NoteClearTarget,
-    NoteCommand,
-    NoteCommandKind,
     NoteErrorCode,
     NotePaths,
     NoteScope,
@@ -15,7 +13,6 @@ from mewcode_agent.notes.manager import (
     NOTES_EXIT_TIMEOUT_SECONDS,
     NOTES_TRIGGER_REQUESTS,
     NotesManager,
-    parse_note_command,
 )
 from mewcode_agent.notes.storage import (
     NOTES_FILE_BYTES,
@@ -43,8 +40,6 @@ __all__ = [
     "NOTES_SYSTEM_PROMPT",
     "NOTES_TRIGGER_REQUESTS",
     "NoteClearTarget",
-    "NoteCommand",
-    "NoteCommandKind",
     "NoteErrorCode",
     "NotePaths",
     "NoteGeneration",
@@ -56,7 +51,6 @@ __all__ = [
     "NotesManager",
     "load_notes",
     "note_paths",
-    "parse_note_command",
     "render_project_notes",
     "render_user_notes",
     "write_note_scope",

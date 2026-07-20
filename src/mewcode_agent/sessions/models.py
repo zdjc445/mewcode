@@ -23,6 +23,7 @@ SessionErrorCode: TypeAlias = Literal[
     "session_access_denied",
     "session_delete_active",
     "session_delete_failed",
+    "session_switch_failed",
     "session_resume_failed",
 ]
 SessionDiagnosticCode: TypeAlias = Literal[
@@ -35,13 +36,6 @@ SessionDiagnosticCode: TypeAlias = Literal[
     "session_line_sequence_not_increasing",
     "session_tool_batch_invalid",
 ]
-SessionCommandKind: TypeAlias = Literal[
-    "list",
-    "resume",
-    "path",
-    "delete",
-]
-
 _ERROR_MESSAGES: dict[SessionErrorCode, str] = {
     "session_write_failed": "会话消息或元数据写入失败",
     "session_record_too_large": "会话消息记录超过 65 MiB",
@@ -51,6 +45,7 @@ _ERROR_MESSAGES: dict[SessionErrorCode, str] = {
     "session_access_denied": "会话路径不属于会话根目录",
     "session_delete_active": "不能删除当前活动会话",
     "session_delete_failed": "会话删除失败",
+    "session_switch_failed": "会话切换失败",
     "session_resume_failed": "会话恢复或运行时重置失败",
 }
 
@@ -377,21 +372,6 @@ class SessionRecovery:
             raise ValueError("diagnostics 必须是 SessionDiagnostic tuple")
         if type(self.repaired) is not bool:
             raise ValueError("repaired 必须是布尔值")
-
-
-@dataclass(frozen=True, slots=True)
-class SessionCommand:
-    kind: SessionCommandKind
-    session_id: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.kind not in ("list", "resume", "path", "delete"):
-            raise ValueError("session command kind 无效")
-        if self.kind == "list":
-            if self.session_id is not None:
-                raise ValueError("list command 不能包含 session_id")
-        else:
-            validate_session_id(self.session_id)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)

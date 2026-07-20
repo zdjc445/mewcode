@@ -1,4 +1,4 @@
-"""Active-session lifecycle, listing, exact commands, and explicit delete."""
+"""Active-session lifecycle, listing, switching, and explicit delete."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-import re
 import shutil
 from uuid import uuid4
 
@@ -14,7 +13,6 @@ from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ChatMessage
 from mewcode_agent.prompting.models import RuntimeInstruction
 from mewcode_agent.sessions.models import (
-    SessionCommand,
     SessionDeleteTarget,
     SessionError,
     SessionMeta,
@@ -27,27 +25,7 @@ from mewcode_agent.sessions.storage import (
     recover_session,
 )
 
-_RESUME_COMMAND = re.compile(r"/resume ([0-9a-f]{32})\Z")
-_PATH_COMMAND = re.compile(r"/session path ([0-9a-f]{32})\Z")
-_DELETE_COMMAND = re.compile(r"/session delete ([0-9a-f]{32})\Z")
 _RESUME_GAP_SECONDS = 7 * 24 * 60 * 60
-
-
-def parse_session_command(value: str) -> SessionCommand | None:
-    if not isinstance(value, str):
-        raise TypeError("value 必须是字符串")
-    normalized = value.strip()
-    if normalized == "/sessions":
-        return SessionCommand("list")
-    for pattern, kind in (
-        (_RESUME_COMMAND, "resume"),
-        (_PATH_COMMAND, "path"),
-        (_DELETE_COMMAND, "delete"),
-    ):
-        match = pattern.fullmatch(normalized)
-        if match is not None:
-            return SessionCommand(kind, match.group(1))  # type: ignore[arg-type]
-    return None
 
 
 class SessionManager:
@@ -85,6 +63,7 @@ class SessionManager:
         self._provider_id = provider_id
         self._model = model
         self._history = history
+        self._id_factory = id_factory
         self._now_factory = now_factory
         self._journal = self._new_journal(session_id)
         self._history.set_append_recorder(self._journal.append)
@@ -291,6 +270,41 @@ class SessionManager:
                 )
                 raise SessionError("session_resume_failed") from exc
         return recovery
+
+    def start_new(
+        self,
+        *,
+        activate: Callable[[], None] | None = None,
+    ) -> str:
+        previous_id = self._journal.session_id
+        previous_meta = self._journal.meta
+        previous_messages = tuple(self._history.snapshot())
+        session_id = self._id_factory()
+        try:
+            validate_session_id(session_id)
+        except ValueError as exc:
+            raise SessionError("session_switch_failed") from exc
+        if session_id == previous_id or (
+            self._sessions_root / session_id
+        ).exists():
+            raise SessionError("session_switch_failed")
+
+        self._journal.close()
+        try:
+            self._history.restore(())
+            self._journal = self._new_journal(session_id)
+            self._history.set_append_recorder(self._journal.append)
+            if activate is not None:
+                activate()
+        except Exception as exc:
+            self._journal.close()
+            self._reopen(
+                session_id=previous_id,
+                meta=previous_meta,
+                messages=previous_messages,
+            )
+            raise SessionError("session_switch_failed") from exc
+        return session_id
 
     def resume_gap_instruction(
         self,

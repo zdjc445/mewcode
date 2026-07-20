@@ -37,6 +37,7 @@ COMMAND_CATEGORIES: tuple[CommandCategory, ...] = (
     "security",
 )
 _COMMAND_NAME = re.compile(r"(?:[a-z][a-z0-9-]*|\?)\Z")
+_ERROR_CODE = re.compile(r"[a-z][a-z0-9_]*\Z")
 _ERROR_MESSAGES: dict[CommandErrorCode, str] = {
     "command_registry_invalid": "命令注册中心无效",
     "command_usage_invalid": "命令参数无效",
@@ -68,6 +69,19 @@ class CommandError(Exception):
 class CommandUsageError(CommandError):
     def __init__(self) -> None:
         super().__init__("command_usage_invalid")
+
+
+class CommandDomainError(Exception):
+    """Carry a previously validated domain error across the dispatcher."""
+
+    def __init__(self, code: str, message: str) -> None:
+        if not isinstance(code, str) or _ERROR_CODE.fullmatch(code) is None:
+            raise ValueError("domain error code 无效")
+        if not _is_nonempty_single_line(message):
+            raise ValueError("domain error message 无效")
+        self.code = code
+        self.message = message
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,4 +271,3 @@ def _is_nonempty_single_line(value: object) -> bool:
         and bool(value.strip())
         and not any(character in value for character in "\r\n\x00")
     )
-

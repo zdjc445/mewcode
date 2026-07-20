@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
-
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, RichLog, Static, Switch
+from textual.widgets import (
+    Button,
+    Input,
+    OptionList,
+    RichLog,
+    Static,
+    Switch,
+)
 from textual.worker import Worker
 
 from mewcode_agent.agent import (
@@ -33,23 +37,16 @@ from mewcode_agent.agent import (
     ToolResultEvent,
     UserMessageEvent,
 )
-from mewcode_agent.compaction import ContextCompactionError
+from mewcode_agent.commands import (
+    CommandController,
+    CommandError,
+    CommandMode,
+    CommandRegistry,
+    ConfirmationRequest,
+)
 from mewcode_agent.history import ConversationHistory
-from mewcode_agent.notes import (
-    NoteClearTarget,
-    NoteCommand,
-    NotesError,
-    NotesManager,
-    parse_note_command,
-)
-from mewcode_agent.sessions import (
-    SessionCommand,
-    SessionDeleteTarget,
-    SessionError,
-    SessionManager,
-    SessionRecovery,
-    parse_session_command,
-)
+from mewcode_agent.notes import NotesManager
+from mewcode_agent.sessions import SessionError
 
 
 class ToolApprovalScreen(ModalScreen[ToolApprovalDecision | None]):
@@ -234,130 +231,108 @@ class PlanApprovalScreen(ModalScreen[PlanApprovalResolution | None]):
         self.dismiss(None)
 
 
-class SessionDeleteScreen(ModalScreen[bool]):
-    """Require explicit confirmation before deleting one saved session."""
+class CommandConfirmationScreen(ModalScreen[bool]):
+    """Render one generic command confirmation request."""
 
-    BINDINGS = [("escape", "cancel_delete", "取消删除")]
+    BINDINGS = [("escape", "cancel_confirmation", "取消")]
 
     CSS = """
-    SessionDeleteScreen {
+    CommandConfirmationScreen {
         align: center middle;
         background: $background 60%;
     }
 
-    #session-delete-card {
+    #command-confirmation-card {
         width: 80;
         height: auto;
         max-height: 80%;
-        padding: 1 2;
-        border: round $error;
-        background: $surface;
-    }
-
-    #session-delete-actions {
-        height: auto;
-        margin-top: 1;
-    }
-
-    #session-delete-actions Button {
-        margin-right: 1;
-    }
-    """
-
-    def __init__(self, target: SessionDeleteTarget) -> None:
-        super().__init__()
-        self._target = target
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="session-delete-card"):
-            yield Static("删除会话（不可恢复）")
-            yield Static(f"session ID：{self._target.session_id}")
-            yield Static(f"标题：{self._target.title}")
-            yield Static(f"路径：{self._target.path}")
-            with Horizontal(id="session-delete-actions"):
-                yield Button(
-                    "确认删除",
-                    id="confirm-session-delete",
-                    variant="error",
-                )
-                yield Button(
-                    "取消",
-                    id="cancel-session-delete",
-                    variant="primary",
-                )
-
-    @on(Button.Pressed, "#confirm-session-delete")
-    def confirm_delete(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#cancel-session-delete")
-    def cancel_delete(self) -> None:
-        self.dismiss(False)
-
-    def action_cancel_delete(self) -> None:
-        self.dismiss(False)
-
-
-class NoteClearScreen(ModalScreen[bool]):
-    """Require explicit confirmation before clearing one note scope."""
-
-    BINDINGS = [("escape", "cancel_clear", "取消清空")]
-
-    CSS = """
-    NoteClearScreen {
-        align: center middle;
-        background: $background 60%;
-    }
-
-    #note-clear-card {
-        width: 80;
-        height: auto;
         padding: 1 2;
         border: round $warning;
         background: $surface;
     }
 
-    #note-clear-actions {
+    #command-confirmation-actions {
         height: auto;
         margin-top: 1;
     }
 
-    #note-clear-actions Button {
+    #command-confirmation-actions Button {
         margin-right: 1;
     }
     """
 
-    def __init__(self, target: NoteClearTarget) -> None:
+    def __init__(self, request: ConfirmationRequest) -> None:
         super().__init__()
-        self._target = target
+        self._request = request
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="note-clear-card"):
-            yield Static("清空笔记")
-            yield Static(f"scope：{self._target.scope}")
-            yield Static(f"路径：{self._target.path}")
-            with Horizontal(id="note-clear-actions"):
+        with Vertical(id="command-confirmation-card"):
+            yield Static(self._request.title)
+            for name, value in self._request.fields:
+                yield Static(f"{name}：{value}")
+            with Horizontal(id="command-confirmation-actions"):
                 yield Button(
-                    "确认清空",
-                    id="confirm-note-clear",
-                    variant="warning",
+                    "确认",
+                    id="confirm-command",
+                    variant=(
+                        "error" if self._request.destructive else "warning"
+                    ),
                 )
                 yield Button(
                     "取消",
-                    id="cancel-note-clear",
+                    id="cancel-command",
                     variant="primary",
                 )
 
-    @on(Button.Pressed, "#confirm-note-clear")
-    def confirm_clear(self) -> None:
+    @on(Button.Pressed, "#confirm-command")
+    def confirm(self) -> None:
         self.dismiss(True)
 
-    @on(Button.Pressed, "#cancel-note-clear")
-    def cancel_clear(self) -> None:
+    @on(Button.Pressed, "#cancel-command")
+    def cancel(self) -> None:
         self.dismiss(False)
 
-    def action_cancel_clear(self) -> None:
+    def action_cancel_confirmation(self) -> None:
         self.dismiss(False)
+
+
+class CommandCompletionScreen(ModalScreen[str | None]):
+    """Keyboard-selectable popup for public command completions."""
+
+    BINDINGS = [("escape", "cancel_completion", "取消补全")]
+
+    CSS = """
+    CommandCompletionScreen {
+        align: center bottom;
+        background: $background 20%;
+    }
+
+    #command-completions {
+        width: 50;
+        height: auto;
+        max-height: 12;
+        margin-bottom: 3;
+    }
+    """
+
+    def __init__(self, candidates: tuple[str, ...]) -> None:
+        if len(candidates) < 2:
+            raise ValueError("补全弹窗至少需要两个候选")
+        super().__init__()
+        self._candidates = candidates
+
+    def compose(self) -> ComposeResult:
+        yield OptionList(
+            *(f"/{candidate}" for candidate in self._candidates),
+            id="command-completions",
+        )
+
+    @on(OptionList.OptionSelected, "#command-completions")
+    def select_option(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self._candidates[event.option_index])
+
+    def action_cancel_completion(self) -> None:
+        self.dismiss(None)
 
 
 class ChatApp(App[None]):
@@ -404,29 +379,29 @@ class ChatApp(App[None]):
         *,
         provider_id: str,
         model: str,
-        session_manager: SessionManager | None = None,
-        session_activator: Callable[[SessionRecovery], None] | None = None,
+        command_registry: CommandRegistry | None = None,
         notes_manager: NotesManager | None = None,
     ) -> None:
         super().__init__()
-        if (session_manager is None) != (session_activator is None):
-            raise ValueError(
-                "session_manager 与 session_activator 必须同时提供"
-            )
         self.agent_loop = agent_loop
         self.history = history
         self.provider_id = provider_id
         self.model = model
-        self.session_manager = session_manager
-        self._session_activator = session_activator
         self.notes_manager = notes_manager
+        self.command_registry = command_registry or CommandRegistry()
+        if not self.command_registry.frozen:
+            self.command_registry.freeze()
+        self.command_controller = CommandController(
+            self.command_registry,
+            self,
+        )
         self.active_response = ""
         self.active_thinking = ""
         self._command_output: list[str] = []
+        self._default_mode: CommandMode = "execute"
+        self._status_state = "就绪"
         self._active_context: AgentRunContext | None = None
-        self._active_compaction_worker: Worker[None] | None = None
-        self._active_session_worker: Worker[None] | None = None
-        self._active_note_worker: Worker[None] | None = None
+        self._active_input_worker: Worker[None] | None = None
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="chat-log", wrap=True, markup=False)
@@ -444,8 +419,12 @@ class ChatApp(App[None]):
         self.query_one("#prompt-input", Input).focus()
 
     def _set_status(self, state: str) -> None:
+        self._status_state = state
+        hints = " ".join(self.command_registry.status_hints())
+        suffix = f" | {hints}" if hints else ""
         self.query_one("#status", Static).update(
-            f"{self.provider_id} | {self.model} | {state}"
+            f"{self.provider_id} | {self.model} | "
+            f"mode={self._default_mode} | {state}{suffix}"
         )
 
     def _clear_active_output(self) -> None:
@@ -475,9 +454,56 @@ class ChatApp(App[None]):
         for line in self._command_output:
             log.write(f"MewCode: {line}")
 
-    def _show_command_output(self, *lines: str) -> None:
+    async def show_system_message(self, lines: tuple[str, ...]) -> None:
+        if not isinstance(lines, tuple) or any(
+            not isinstance(line, str) for line in lines
+        ):
+            raise ValueError("命令输出必须是字符串 tuple")
         self._command_output.extend(lines)
         self._render_transcript()
+
+    async def request_confirmation(
+        self,
+        request: ConfirmationRequest,
+    ) -> bool:
+        try:
+            result = await self.push_screen_wait(
+                CommandConfirmationScreen(request)
+            )
+        except Exception as exc:
+            raise CommandError("command_confirmation_failed") from exc
+        return bool(result)
+
+    async def send_user_message(
+        self,
+        message: str,
+        *,
+        mode: CommandMode,
+    ) -> None:
+        await self._run_agent_message(message, mode=mode)
+
+    def get_default_mode(self) -> CommandMode:
+        return self._default_mode
+
+    def set_default_mode(self, mode: CommandMode) -> None:
+        if mode not in ("plan", "execute"):
+            raise ValueError("mode 必须为 plan 或 execute")
+        self._default_mode = mode
+        switch = self.query_one("#plan-only-switch", Switch)
+        switch.value = mode == "plan"
+
+    def clear_transcript(self) -> None:
+        self._clear_active_output()
+        self._command_output.clear()
+        self._render_transcript()
+
+    def refresh_status(self, state: str) -> None:
+        self._set_status(state)
+
+    @on(Switch.Changed, "#plan-only-switch")
+    def update_default_mode(self, event: Switch.Changed) -> None:
+        self._default_mode = "plan" if event.value else "execute"
+        self._set_status(self._status_state)
 
     @on(Input.Submitted, "#prompt-input")
     def submit_prompt(self, event: Input.Submitted) -> None:
@@ -486,60 +512,46 @@ class ChatApp(App[None]):
         prompt_input.value = ""
         if not prompt or prompt_input.disabled:
             return
-
-        plan_switch = self.query_one("#plan-only-switch", Switch)
-        note_command = (
-            parse_note_command(prompt)
-            if self.notes_manager is not None
-            else None
-        )
-        if note_command is not None:
-            self._clear_active_output()
-            prompt_input.disabled = True
-            plan_switch.disabled = True
-            self._set_status("正在处理笔记命令")
-            self._active_note_worker = self.run_note_command(note_command)
-            return
-        session_command = (
-            parse_session_command(prompt)
-            if self.session_manager is not None
-            else None
-        )
-        if session_command is not None:
-            self._clear_active_output()
-            prompt_input.disabled = True
-            plan_switch.disabled = True
-            self._set_status("正在处理会话命令")
-            self._active_session_worker = self.run_session_command(
-                session_command
-            )
-            return
-        if prompt == "/compact":
-            self._clear_active_output()
-            prompt_input.disabled = True
-            plan_switch.disabled = True
-            self._set_status("正在压缩上下文")
-            self._active_compaction_worker = self.compact_context()
-            return
-
-        plan_only = plan_switch.value
         self._clear_active_output()
         prompt_input.disabled = True
-        plan_switch.disabled = True
-        self._set_status("生成中")
-        self.stream_response(prompt, plan_only)
+        self.query_one("#plan-only-switch", Switch).disabled = True
+        self._set_status("正在处理输入")
+        self._active_input_worker = self.process_input(prompt)
 
     @work(exclusive=True, exit_on_error=False)
-    async def stream_response(self, prompt: str, plan_only: bool) -> None:
+    async def process_input(self, prompt: str) -> None:
         prompt_input = self.query_one("#prompt-input", Input)
         plan_switch = self.query_one("#plan-only-switch", Switch)
+        try:
+            result = await self.command_controller.dispatch(prompt)
+            if not result.consumed:
+                await self._run_agent_message(
+                    prompt,
+                    mode=self._default_mode,
+                )
+            elif self._status_state == "正在处理输入":
+                self._set_status("就绪")
+        finally:
+            self._active_input_worker = None
+            prompt_input.disabled = False
+            plan_switch.disabled = False
+            prompt_input.focus()
+
+    async def _run_agent_message(
+        self,
+        prompt: str,
+        *,
+        mode: CommandMode,
+    ) -> None:
         context = AgentRunContext()
         self._active_context = context
+        self._clear_active_output()
+        self._set_status("生成中")
         try:
             async for event in self.agent_loop.run(
                 prompt,
                 self.history,
-                plan_only=plan_only,
+                plan_only=mode == "plan",
                 context=context,
             ):
                 await self._handle_agent_event(event, context)
@@ -555,183 +567,45 @@ class ChatApp(App[None]):
             self._set_status("错误：Agent 运行失败")
         finally:
             self._active_context = None
-            prompt_input.disabled = False
-            plan_switch.disabled = False
-            prompt_input.focus()
 
-    @work(exclusive=True, exit_on_error=False)
-    async def run_session_command(self, command: SessionCommand) -> None:
+    def on_key(self, event: events.Key) -> None:
+        if event.key != "tab" or isinstance(
+            self.screen,
+            CommandCompletionScreen,
+        ):
+            return
         prompt_input = self.query_one("#prompt-input", Input)
-        plan_switch = self.query_one("#plan-only-switch", Switch)
-        manager = self.session_manager
-        assert manager is not None
-        try:
-            if command.kind == "list":
-                metas = await asyncio.to_thread(manager.list_sessions)
-                if metas:
-                    self._show_command_output(
-                        *(
-                            f"{meta.session_id} | {meta.updated_at} | "
-                            f"{meta.title} | {meta.summary}"
-                            for meta in metas
-                        )
-                    )
-                    self._set_status(f"已列出 {len(metas)} 个会话")
-                else:
-                    self._show_command_output("当前项目没有已保存会话")
-                    self._set_status("会话列表为空")
-                return
+        if (
+            prompt_input.disabled
+            or not prompt_input.has_focus
+            or prompt_input.cursor_position != len(prompt_input.value)
+        ):
+            return
+        candidate_text = prompt_input.value.lstrip()
+        if not candidate_text.startswith("/") or " " in candidate_text[1:]:
+            return
+        event.prevent_default()
+        event.stop()
+        candidates = self.command_registry.completion_candidates(
+            candidate_text[1:]
+        )
+        if not candidates:
+            self._set_status("没有匹配的命令；输入 /help 查看帮助")
+            return
+        if len(candidates) == 1:
+            self._apply_completion(candidates[0])
+            return
+        self.push_screen(
+            CommandCompletionScreen(candidates),
+            self._apply_completion,
+        )
 
-            assert command.session_id is not None
-            if command.kind == "path":
-                path = await asyncio.to_thread(
-                    manager.session_path,
-                    command.session_id,
-                )
-                self._show_command_output(str(path))
-                self._set_status("已显示会话路径")
-                return
-            if command.kind == "delete":
-                target = await asyncio.to_thread(
-                    manager.prepare_delete,
-                    command.session_id,
-                )
-                confirmed = await self.push_screen_wait(
-                    SessionDeleteScreen(target)
-                )
-                if not confirmed:
-                    self._set_status("已取消删除会话")
-                    return
-                await asyncio.to_thread(manager.delete, target)
-                self._show_command_output(
-                    f"已删除会话 {target.session_id}：{target.path}"
-                )
-                self._set_status("会话已删除")
-                return
-
-            assert command.kind == "resume"
-            assert self._session_activator is not None
-            if self.notes_manager is not None:
-                await self.notes_manager.wait_until_idle()
-            recovery = await manager.resume_async(
-                command.session_id,
-                activate=self._session_activator,
-            )
-            self._clear_active_output()
-            self._render_transcript()
-            try:
-                preparation = await self.agent_loop.prepare_restored_history(
-                    self.history
-                )
-            except ContextCompactionError as exc:
-                self._render_transcript()
-                self._set_status(
-                    "会话已恢复；恢复上下文处理失败："
-                    f"{exc.code}"
-                )
-                return
-            details = (
-                f"消息={len(recovery.messages)}，"
-                f"修复={'是' if recovery.repaired else '否'}，"
-                f"诊断={len(recovery.diagnostics)}"
-            )
-            if preparation is not None and preparation.summary_changed:
-                details += "，已执行恢复压缩"
-            self._set_status(f"会话已恢复：{details}")
-        except SessionError as exc:
-            self._set_status(f"会话命令失败：{exc.message}（{exc.code}）")
-        except Exception:
-            self._set_status(
-                "会话命令失败：会话恢复或运行时重置失败"
-                "（session_resume_failed）"
-            )
-        finally:
-            self._active_session_worker = None
-            prompt_input.disabled = False
-            plan_switch.disabled = False
-            prompt_input.focus()
-
-    @work(exclusive=True, exit_on_error=False)
-    async def run_note_command(self, command: NoteCommand) -> None:
+    def _apply_completion(self, candidate: str | None) -> None:
         prompt_input = self.query_one("#prompt-input", Input)
-        plan_switch = self.query_one("#plan-only-switch", Switch)
-        manager = self.notes_manager
-        assert manager is not None
-        try:
-            if command.kind == "show":
-                snapshot = manager.snapshot
-
-                def section(title: str, entries: tuple[str, ...]) -> list[str]:
-                    return [title, *(f"- {entry}" for entry in entries)] if entries else [title, "(空)"]
-
-                self._show_command_output(
-                    *section("用户偏好", snapshot.user_preferences),
-                    *section("纠正反馈", snapshot.correction_feedback),
-                    *section("项目知识", snapshot.project_knowledge),
-                    *section("参考资料", snapshot.references),
-                )
-                self._set_status("已显示当前笔记")
-                return
-            if command.kind == "paths":
-                self._show_command_output(
-                    f"user: {manager.paths.user}",
-                    f"project: {manager.paths.project}",
-                )
-                self._set_status("已显示笔记路径")
-                return
-            scope = "user" if command.kind == "clear_user" else "project"
-            target = manager.clear_target(scope)
-            confirmed = await self.push_screen_wait(NoteClearScreen(target))
-            if not confirmed:
-                self._set_status("已取消清空笔记")
-                return
-            await manager.clear(scope)
-            self._show_command_output(
-                f"已清空 {scope} 笔记：{target.path}"
-            )
-            self._set_status("笔记已清空")
-        except NotesError as exc:
-            self._set_status(f"笔记命令失败：{exc.message}（{exc.code}）")
-        except Exception:
-            self._set_status(
-                "笔记命令失败：笔记操作发生未预期错误"
-                "（notes_write_failed）"
-            )
-        finally:
-            self._active_note_worker = None
-            prompt_input.disabled = False
-            plan_switch.disabled = False
-            prompt_input.focus()
-
-    @work(exclusive=True, exit_on_error=False)
-    async def compact_context(self) -> None:
-        prompt_input = self.query_one("#prompt-input", Input)
-        plan_switch = self.query_one("#plan-only-switch", Switch)
-        try:
-            result = await self.agent_loop.compact_history(self.history)
-        except asyncio.CancelledError:
-            self._set_status("已取消：context_compaction_cancelled")
-            raise
-        except ContextCompactionError as exc:
-            self._set_status(f"压缩失败：{exc.message}（{exc.code}）")
-        except Exception:
-            self._set_status("压缩失败：上下文压缩发生未预期错误")
-        else:
-            if not result.changed:
-                self._set_status("没有可压缩的历史")
-            else:
-                reduction = result.estimate_before - result.estimate_after
-                self._set_status(
-                    "上下文压缩完成："
-                    f"generation={result.generation}，"
-                    f"覆盖消息={result.covered_history_end}，"
-                    f"估算减少={reduction}"
-                )
-        finally:
-            self._active_compaction_worker = None
-            prompt_input.disabled = False
-            plan_switch.disabled = False
-            prompt_input.focus()
+        if candidate is not None:
+            prompt_input.value = f"/{candidate} "
+            prompt_input.cursor_position = len(prompt_input.value)
+        prompt_input.focus()
 
     async def _handle_agent_event(
         self,
@@ -814,5 +688,5 @@ class ChatApp(App[None]):
     def action_cancel_run(self) -> None:
         if self._active_context is not None:
             self._active_context.cancel()
-        elif self._active_compaction_worker is not None:
-            self._active_compaction_worker.cancel()
+        elif self._active_input_worker is not None:
+            self._active_input_worker.cancel()

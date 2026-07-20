@@ -183,6 +183,38 @@ def test_reset_session_clears_checkpoint_failures_and_compactor_state() -> None:
     assert compactor.reset_calls == 1
 
 
+def test_status_estimate_is_read_only_and_reports_compaction_state() -> None:
+    summarizer = StubSummarizer()
+    compactor = StubToolCompactor()
+    estimator = SequencedEstimator((1234,))
+    manager = ContextWindowManager(
+        MeasureProvider(),  # type: ignore[arg-type]
+        compactor,  # type: ignore[arg-type]
+        summarizer,  # type: ignore[arg-type]
+        context_window_tokens=3000,
+        max_tokens=100,
+        estimator=estimator,  # type: ignore[arg-type]
+        config=manager_config(),
+    )
+    manager._consecutive_summary_failures = 2
+
+    status = manager.inspect_status(
+        PromptFrame("system", (ChatMessage(role="user", content="hello"),)),
+        tools=None,
+    )
+
+    assert status.estimated_prompt_tokens == 1234
+    assert status.used_actual_baseline is False
+    assert status.prompt_budget_tokens == 2900
+    assert status.auto_trigger_tokens == 1450
+    assert status.checkpoint_generation == 0
+    assert status.checkpoint_covered_messages == 0
+    assert status.consecutive_summary_failures == 2
+    assert status.auto_compaction_disabled is False
+    assert compactor.calls == 0
+    assert summarizer.calls == []
+
+
 @pytest.mark.asyncio
 async def test_restored_history_below_budget_only_runs_layer_one() -> None:
     history = populated_history()

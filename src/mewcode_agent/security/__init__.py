@@ -13,6 +13,7 @@ from mewcode_agent.security.models import (
     RuleScope,
     SecurityAction,
     SecurityConfiguration,
+    SecurityPolicyStatus,
     SecurityRequest,
     SecurityRule,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "SecurityConfigError",
     "SecurityConfiguration",
     "SecurityPolicyEngine",
+    "SecurityPolicyStatus",
     "SecurityRequest",
     "SecurityRule",
     "load_security_configuration",

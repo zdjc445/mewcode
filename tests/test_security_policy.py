@@ -158,6 +158,39 @@ def test_permission_mode_only_supplies_unmatched_default(
     assert decision.action == expected
 
 
+def test_runtime_mode_override_is_process_local_and_rules_still_win(
+    tmp_path: Path,
+) -> None:
+    explicit_ask = rule("project.ask", "project", "ask")
+    policy = engine(
+        tmp_path,
+        mode="strict",
+        project_rules=(explicit_ask,),
+    )
+    unmatched = request(
+        tmp_path,
+        tool="write_file",
+        category="write",
+        arguments={"path": "README.md"},
+    )
+
+    policy.set_mode_override("permissive")
+
+    assert policy.configured_mode == "strict"
+    assert policy.mode == "permissive"
+    assert policy.evaluate(unmatched).action == "allow"
+    assert policy.evaluate(request(tmp_path)).action == "ask"
+    status = policy.status()
+    assert status.configured_mode == "strict"
+    assert status.effective_mode == "permissive"
+    assert status.has_runtime_override is True
+    assert status.project_rule_count == 1
+
+    policy.set_mode_override(None)
+    assert policy.mode == "strict"
+    assert policy.status().has_runtime_override is False
+
+
 def test_request_authorization_does_not_override_explicit_ask(
     tmp_path: Path,
 ) -> None:

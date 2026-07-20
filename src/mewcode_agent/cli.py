@@ -16,6 +16,11 @@ from mewcode_agent.compaction import (
     ContextWindowManager,
     ToolResultCompactor,
 )
+from mewcode_agent.commands import (
+    BuiltinCommandServices,
+    PermissionCommandPaths,
+    build_builtin_command_registry,
+)
 from mewcode_agent.config import ConfigError, load_config
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.instructions import (
@@ -42,6 +47,7 @@ from mewcode_agent.prompting import (
     PromptConfigError,
     PromptEnvironmentError,
     PromptRuntime,
+    RuntimeInstruction,
     collect_session_environment,
     load_prompt_modules,
 )
@@ -110,9 +116,10 @@ async def run_application() -> int:
         project_security_path = (
             working_directory / ".mewcode" / "security.yaml"
         )
-        approval_store = PermanentApprovalStore(
+        permanent_approval_path = (
             user_config_directory / "security-approvals.yaml"
         )
+        approval_store = PermanentApprovalStore(permanent_approval_path)
         config = load_config(config_path)
         modules = load_prompt_modules(
             user_path=user_prompt_path,
@@ -254,7 +261,9 @@ async def run_application() -> int:
         assert session_manager is not None
         assert notes_manager is not None
 
-        def activate_session(recovery: SessionRecovery) -> None:
+        def load_current_session_controls() -> tuple[
+            RuntimeInstruction, ...
+        ]:
             documents = load_instruction_documents(
                 user_root=user_config_directory,
                 project_root=working_directory,
@@ -263,18 +272,45 @@ async def run_application() -> int:
                 document.to_runtime_instruction() for document in documents
             )
             controls = (*controls, *notes_manager.reload_for_session())
+            return controls
+
+        def activate_session(recovery: SessionRecovery) -> None:
+            controls = load_current_session_controls()
             gap = session_manager.resume_gap_instruction(recovery.meta)
             if gap is not None:
                 controls = (*controls, gap)
             agent_loop.reset_session(session_controls=controls)
+
+        def activate_new_session() -> None:
+            agent_loop.reset_session(
+                session_controls=load_current_session_controls()
+            )
+
+        command_registry = build_builtin_command_registry(
+            BuiltinCommandServices(
+                agent_loop,
+                history,
+                session_manager,
+                notes_manager,
+                security_policy,
+                provider_config.provider_id,
+                provider_config.model,
+                PermissionCommandPaths(
+                    user_security_path.resolve(strict=False),
+                    project_security_path.resolve(strict=False),
+                    permanent_approval_path.resolve(strict=False),
+                ),
+                activate_session,
+                activate_new_session,
+            )
+        )
 
         app = ChatApp(
             agent_loop,
             history,
             provider_id=provider_config.provider_id,
             model=provider_config.model,
-            session_manager=session_manager,
-            session_activator=activate_session,
+            command_registry=command_registry,
             notes_manager=notes_manager,
         )
         await app.run_async()

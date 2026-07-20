@@ -233,3 +233,35 @@ class ContextEstimate:
             raise ValueError("estimated_prompt_tokens 必须是非负整数")
         if type(self.used_actual_baseline) is not bool:
             raise ValueError("used_actual_baseline 必须是布尔值")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextStatus:
+    estimated_prompt_tokens: int
+    used_actual_baseline: bool
+    prompt_budget_tokens: int
+    auto_trigger_tokens: int
+    checkpoint_generation: int
+    checkpoint_covered_messages: int
+    consecutive_summary_failures: int
+    auto_compaction_disabled: bool
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.estimated_prompt_tokens,
+            self.prompt_budget_tokens,
+            self.auto_trigger_tokens,
+            self.checkpoint_generation,
+            self.checkpoint_covered_messages,
+            self.consecutive_summary_failures,
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError("上下文状态数值必须是非负整数")
+        if type(self.used_actual_baseline) is not bool:
+            raise ValueError("used_actual_baseline 必须是 bool")
+        if type(self.auto_compaction_disabled) is not bool:
+            raise ValueError("auto_compaction_disabled 必须是 bool")
+        if self.prompt_budget_tokens <= 0:
+            raise ValueError("prompt_budget_tokens 必须大于 0")
+        if self.auto_trigger_tokens > self.prompt_budget_tokens:
+            raise ValueError("auto_trigger_tokens 不能超过 Prompt 预算")

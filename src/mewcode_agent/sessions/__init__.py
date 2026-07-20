@@ -8,8 +8,6 @@ from mewcode_agent.sessions.models import (
     SessionDiagnosticCode,
     SessionError,
     SessionErrorCode,
-    SessionCommand,
-    SessionCommandKind,
     SessionDeleteTarget,
     SessionMeta,
     SessionRecord,
@@ -20,7 +18,6 @@ from mewcode_agent.sessions.models import (
 )
 from mewcode_agent.sessions.manager import (
     SessionManager,
-    parse_session_command,
 )
 from mewcode_agent.sessions.storage import (
     SessionJournal,
@@ -36,8 +33,6 @@ __all__ = [
     "SessionDiagnosticCode",
     "SessionError",
     "SessionErrorCode",
-    "SessionCommand",
-    "SessionCommandKind",
     "SessionDeleteTarget",
     "SessionJournal",
     "SessionManager",
@@ -47,7 +42,6 @@ __all__ = [
     "chat_message_from_dict",
     "chat_message_to_dict",
     "load_session_meta",
-    "parse_session_command",
     "recover_session",
     "validate_session_id",
 ]

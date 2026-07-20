@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mewcode_agent.commands.models import (
     CommandDispatchResult,
+    CommandDomainError,
     CommandError,
     CommandInvocation,
     CommandUI,
@@ -65,7 +66,7 @@ class CommandController:
                 )
             )
             success = False
-        except CommandError as exc:
+        except (CommandError, CommandDomainError) as exc:
             await self._ui.show_system_message(
                 (f"{exc.message}（{exc.code}）",)
             )
@@ -83,4 +84,3 @@ class CommandController:
             spec.execution_kind,
             success,
         )
-

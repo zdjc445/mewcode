@@ -28,10 +28,23 @@ from mewcode_agent.agent import (
 from mewcode_agent.agent.context import AgentRunCancelled
 import mewcode_agent.app as app_module
 from mewcode_agent.app import ChatApp
+from mewcode_agent.commands import (
+    REVIEW_SCOPED_PREFIX,
+    REVIEW_SCOPED_SUFFIX,
+    BuiltinCommandServices,
+    PermissionCommandPaths,
+    build_builtin_command_registry,
+)
 from mewcode_agent.compaction import ManualCompactionResult
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ChatMessage, ToolCall
 from mewcode_agent.notes import NoteClearTarget, NotePaths, NotesSnapshot
+from mewcode_agent.security import (
+    PathSandbox,
+    SecurityBoundary,
+    SecurityConfiguration,
+    SecurityPolicyEngine,
+)
 from mewcode_agent.sessions import SessionJournal, SessionManager
 from mewcode_agent.tools.base import ToolResult
 
@@ -269,12 +282,21 @@ class FakeNotesManager:
         )
         self.successes = 0
         self.clear_calls: list[str] = []
+        self.generation = 1
+        self.unprocessed_successes = 0
 
     def record_successful_request(self) -> None:
         self.successes += 1
 
     async def wait_until_idle(self) -> None:
         return None
+
+    async def flush_before_session_switch(self) -> None:
+        return None
+
+    def reload_for_session(self) -> tuple[object, ...]:
+        self.unprocessed_successes = 0
+        return ()
 
     def clear_target(self, scope: str) -> NoteClearTarget:
         path = self.paths.user if scope == "user" else self.paths.project
@@ -317,17 +339,85 @@ def make_session_app(
         now_factory=lambda: datetime(2026, 7, 20, tzinfo=timezone.utc),
     )
     activations: list[str] = []
+    notes = FakeNotesManager(tmp_path)
+    policy = SecurityPolicyEngine(
+        SecurityConfiguration("default", (), ()),
+        SecurityBoundary(PathSandbox(tmp_path)),
+    )
+    registry = build_builtin_command_registry(
+        BuiltinCommandServices(
+            loop,  # type: ignore[arg-type]
+            history,
+            manager,
+            notes,  # type: ignore[arg-type]
+            policy,
+            "provider",
+            "model",
+            PermissionCommandPaths(
+                (tmp_path / "user-security.yaml").resolve(),
+                (tmp_path / "project-security.yaml").resolve(),
+                (tmp_path / "approvals.yaml").resolve(),
+            ),
+            lambda recovery: activations.append(recovery.meta.session_id),
+            lambda: None,
+        )
+    )
     app = ChatApp(
         loop,  # type: ignore[arg-type]
         history,
         provider_id="provider",
         model="model",
-        session_manager=manager,
-        session_activator=lambda recovery: activations.append(
-            recovery.meta.session_id
-        ),
+        command_registry=registry,
+        notes_manager=notes,  # type: ignore[arg-type]
     )
     return app, manager, history, activations
+
+
+def make_builtin_app(
+    tmp_path: Path,
+    loop: object,
+    history: ConversationHistory,
+    *,
+    notes: FakeNotesManager | None = None,
+) -> ChatApp:
+    selected_notes = notes or FakeNotesManager(tmp_path)
+    manager = SessionManager(
+        sessions_root=tmp_path / "sessions",
+        project_root=tmp_path,
+        provider_id="provider",
+        model="model",
+        history=history,
+    )
+    policy = SecurityPolicyEngine(
+        SecurityConfiguration("default", (), ()),
+        SecurityBoundary(PathSandbox(tmp_path)),
+    )
+    registry = build_builtin_command_registry(
+        BuiltinCommandServices(
+            loop,  # type: ignore[arg-type]
+            history,
+            manager,
+            selected_notes,  # type: ignore[arg-type]
+            policy,
+            "provider",
+            "model",
+            PermissionCommandPaths(
+                (tmp_path / "user-security.yaml").resolve(),
+                (tmp_path / "project-security.yaml").resolve(),
+                (tmp_path / "approvals.yaml").resolve(),
+            ),
+            lambda _recovery: None,
+            lambda: None,
+        )
+    )
+    return ChatApp(
+        loop,  # type: ignore[arg-type]
+        history,
+        provider_id="provider",
+        model="model",
+        command_registry=registry,
+        notes_manager=selected_notes,  # type: ignore[arg-type]
+    )
 
 
 def test_app_has_no_prompt_assembly_or_provider_usage_dependency() -> None:
@@ -340,6 +430,9 @@ def test_app_has_no_prompt_assembly_or_provider_usage_dependency() -> None:
         "PromptComposer",
         "cache_hit_tokens",
         "cache_miss_tokens",
+        "parse_note_command",
+        "parse_session_command",
+        'prompt == "/compact"',
     ):
         assert forbidden not in source
 
@@ -401,15 +494,104 @@ async def test_app_ignores_blank_input() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exact_compact_command_does_not_enter_history() -> None:
-    loop = ManualCompactionAgentLoop()
-    history = ConversationHistory()
-    history.add_assistant("旧回复")
-    app = make_app(loop, history)
+async def test_status_bar_keeps_mode_and_registry_hints(tmp_path: Path) -> None:
+    app = make_builtin_app(
+        tmp_path,
+        RestorableAgentLoop(),
+        ConversationHistory(),
+    )
+
+    async with app.run_test() as pilot:
+        status = app.query_one("#status", Static)
+        initial = str(status.render())
+        assert "mode=execute" in initial
+        assert "/help /status /compact" in initial
+
+        app.query_one("#plan-only-switch", Switch).value = True
+        await pilot.pause()
+
+        changed = str(status.render())
+        assert "mode=plan" in changed
+        assert "/help /status /compact" in changed
+
+
+@pytest.mark.asyncio
+async def test_tab_single_match_completes_and_multiple_matches_open_popup(
+    tmp_path: Path,
+) -> None:
+    app = make_builtin_app(
+        tmp_path,
+        RestorableAgentLoop(),
+        ConversationHistory(),
+    )
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
-        prompt_input.value = "  /compact  "
+        prompt_input.value = "/rev"
+        prompt_input.cursor_position = len(prompt_input.value)
+        await pilot.press("tab")
+        await pilot.pause()
+        assert prompt_input.value == "/review "
+
+        prompt_input.value = "/s"
+        prompt_input.cursor_position = len(prompt_input.value)
+        await pilot.press("tab")
+        await pilot.pause()
+        assert isinstance(app.screen, app_module.CommandCompletionScreen)
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert prompt_input.value in {
+            "/status ",
+            "/stat ",
+            "/sessions ",
+            "/session ",
+        }
+
+
+@pytest.mark.asyncio
+async def test_review_command_uses_execute_without_changing_default_mode(
+    tmp_path: Path,
+) -> None:
+    loop = GatedAgentLoop()
+    history = ConversationHistory()
+    app = make_builtin_app(tmp_path, loop, history)
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        plan_switch = app.query_one("#plan-only-switch", Switch)
+        plan_switch.value = True
+        prompt_input.value = "/review Src/ExactName.py"
+        await pilot.press("enter")
+        await loop.started.wait()
+
+        assert loop.plan_only_values == [False]
+        assert plan_switch.value is True
+        assert history.snapshot()[0] == ChatMessage(
+            role="user",
+            content=(
+                REVIEW_SCOPED_PREFIX
+                + "Src/ExactName.py"
+                + REVIEW_SCOPED_SUFFIX
+            ),
+        )
+
+        loop.release.set()
+        await app.workers.wait_for_complete()
+        assert plan_switch.value is True
+
+
+@pytest.mark.asyncio
+async def test_case_insensitive_compact_command_does_not_enter_history(
+    tmp_path: Path,
+) -> None:
+    loop = ManualCompactionAgentLoop()
+    history = ConversationHistory()
+    history.add_assistant("旧回复")
+    app = make_builtin_app(tmp_path, loop, history)
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "  /COMPACT  "
         await pilot.press("enter")
         await app.workers.wait_for_complete()
         await pilot.pause()
@@ -427,23 +609,21 @@ async def test_exact_compact_command_does_not_enter_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_exact_compact_text_is_an_ordinary_user_message() -> None:
+async def test_invalid_compact_arguments_are_consumed_without_agent_run(
+    tmp_path: Path,
+) -> None:
     loop = GatedAgentLoop()
     history = ConversationHistory()
-    app = make_app(loop, history)
+    app = make_builtin_app(tmp_path, loop, history)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
-        prompt_input.value = "/Compact"
+        prompt_input.value = "/compact extra"
         await pilot.press("enter")
-        await loop.started.wait()
-        loop.release.set()
         await app.workers.wait_for_complete()
 
-    assert history.snapshot()[0] == ChatMessage(
-        role="user",
-        content="/Compact",
-    )
+    assert history.snapshot() == []
+    assert loop.started.is_set() is False
 
 
 @pytest.mark.asyncio
@@ -589,7 +769,7 @@ async def test_delete_command_requires_modal_confirmation(
         assert str(target_path.resolve()) in screen_text
         assert target_path.exists()
 
-        await pilot.click("#confirm-session-delete")
+        await pilot.click("#confirm-command")
         await app.workers.wait_for_complete()
         await pilot.pause()
 
@@ -602,7 +782,7 @@ async def test_delete_command_requires_modal_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_non_exact_session_command_remains_ordinary_user_message(
+async def test_unknown_slash_command_is_consumed_without_agent_run(
     tmp_path: Path,
 ) -> None:
     loop = GatedAgentLoop()
@@ -610,16 +790,12 @@ async def test_non_exact_session_command_remains_ordinary_user_message(
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
-        prompt_input.value = "/Sessions"
+        prompt_input.value = "/Missing"
         await pilot.press("enter")
-        await loop.started.wait()
-        loop.release.set()
         await app.workers.wait_for_complete()
 
-    assert history.snapshot()[0] == ChatMessage(
-        role="user",
-        content="/Sessions",
-    )
+    assert history.snapshot() == []
+    assert loop.started.is_set() is False
 
 
 @pytest.mark.asyncio
@@ -628,13 +804,7 @@ async def test_notes_show_and_paths_commands_do_not_enter_history(
 ) -> None:
     notes = FakeNotesManager(tmp_path)
     history = ConversationHistory()
-    app = ChatApp(
-        RestorableAgentLoop(),  # type: ignore[arg-type]
-        history,
-        provider_id="provider",
-        model="model",
-        notes_manager=notes,  # type: ignore[arg-type]
-    )
+    app = make_builtin_app(tmp_path, RestorableAgentLoop(), history, notes=notes)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
@@ -666,13 +836,7 @@ async def test_notes_clear_requires_scope_and_path_confirmation(
 ) -> None:
     notes = FakeNotesManager(tmp_path)
     history = ConversationHistory()
-    app = ChatApp(
-        RestorableAgentLoop(),  # type: ignore[arg-type]
-        history,
-        provider_id="provider",
-        model="model",
-        notes_manager=notes,  # type: ignore[arg-type]
-    )
+    app = make_builtin_app(tmp_path, RestorableAgentLoop(), history, notes=notes)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
@@ -687,7 +851,7 @@ async def test_notes_clear_requires_scope_and_path_confirmation(
         assert str(notes.paths.project) in screen_text
         assert notes.clear_calls == []
 
-        await pilot.click("#confirm-note-clear")
+        await pilot.click("#confirm-command")
         await app.workers.wait_for_complete()
         await pilot.pause()
 
@@ -727,35 +891,28 @@ async def test_final_response_counts_one_success_for_notes(
 
 
 @pytest.mark.asyncio
-async def test_non_exact_notes_command_is_ordinary_user_message(
+async def test_case_insensitive_notes_alias_is_consumed_locally(
     tmp_path: Path,
 ) -> None:
     notes = FakeNotesManager(tmp_path)
     loop = GatedAgentLoop()
     history = ConversationHistory()
-    app = ChatApp(
-        loop,
-        history,
-        provider_id="provider",
-        model="model",
-        notes_manager=notes,  # type: ignore[arg-type]
-    )
+    app = make_builtin_app(tmp_path, loop, history, notes=notes)
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
         prompt_input.value = "/Notes"
         await pilot.press("enter")
-        await loop.started.wait()
-        loop.release.set()
         await app.workers.wait_for_complete()
 
-    assert history.snapshot()[0] == ChatMessage(role="user", content="/Notes")
+    assert history.snapshot() == []
+    assert loop.started.is_set() is False
 
 
 @pytest.mark.asyncio
-async def test_escape_cancels_manual_compaction() -> None:
+async def test_escape_cancels_manual_compaction(tmp_path: Path) -> None:
     loop = GatedManualCompactionAgentLoop()
-    app = make_app(loop)
+    app = make_builtin_app(tmp_path, loop, ConversationHistory())
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)

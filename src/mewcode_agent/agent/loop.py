@@ -35,6 +35,7 @@ from mewcode_agent.agent.usage import (
 from mewcode_agent.compaction import (
     ContextCompactionError,
     ContextPreparation,
+    ContextStatus,
     ContextWindowManager,
     ManualCompactionResult,
     RestoredHistoryPreparation,
@@ -171,6 +172,20 @@ class AgentLoop:
                 "context_summary_failed",
                 "无法生成上下文压缩请求",
             ) from exc
+
+    def context_status(
+        self,
+        history: ConversationHistory,
+    ) -> ContextStatus | None:
+        manager = self._context_window_manager
+        if manager is None:
+            return None
+        tools = tuple(self._registry.api_tools(self._provider.protocol))
+        frame = self._prompt_composer.compose(
+            history.snapshot(),
+            self._prompt_runtime.timeline(),
+        )
+        return manager.inspect_status(frame, tools=tools)
 
     def reset_session(
         self,

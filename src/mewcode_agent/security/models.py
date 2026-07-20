@@ -157,3 +157,30 @@ class SecurityConfiguration:
             raise ValueError("project_rules 中存在非 project 规则")
         if any(rule.scope != "user" for rule in self.permanent_rules):
             raise ValueError("permanent_rules 中存在非 user 规则")
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityPolicyStatus:
+    configured_mode: PermissionMode
+    effective_mode: PermissionMode
+    has_runtime_override: bool
+    user_rule_count: int
+    project_rule_count: int
+    permanent_rule_count: int
+    session_rule_count: int
+
+    def __post_init__(self) -> None:
+        if self.configured_mode not in ("strict", "default", "permissive"):
+            raise ValueError("configured_mode 无效")
+        if self.effective_mode not in ("strict", "default", "permissive"):
+            raise ValueError("effective_mode 无效")
+        if type(self.has_runtime_override) is not bool:
+            raise ValueError("has_runtime_override 必须是 bool")
+        for value in (
+            self.user_rule_count,
+            self.project_rule_count,
+            self.permanent_rule_count,
+            self.session_rule_count,
+        ):
+            if type(value) is not int or value < 0:
+                raise ValueError("规则数量必须是非负整数")

@@ -1,4 +1,4 @@
-"""Validated note data, commands, and safe failures."""
+"""Validated note data and safe failures."""
 
 from __future__ import annotations
 
@@ -18,13 +18,6 @@ NoteErrorCode: TypeAlias = Literal[
     "notes_update_invalid",
     "notes_tool_call_forbidden",
 ]
-NoteCommandKind: TypeAlias = Literal[
-    "show",
-    "paths",
-    "clear_user",
-    "clear_project",
-]
-
 _ERROR_MESSAGES: dict[NoteErrorCode, str] = {
     "notes_read_failed": "笔记文件无法读取",
     "notes_invalid_format": "笔记 Markdown 结构无效",
@@ -147,20 +140,6 @@ class NotePaths:
             or not self.project.is_absolute()
         ):
             raise ValueError("笔记路径必须是绝对 Path")
-
-
-@dataclass(frozen=True, slots=True)
-class NoteCommand:
-    kind: NoteCommandKind
-
-    def __post_init__(self) -> None:
-        if self.kind not in (
-            "show",
-            "paths",
-            "clear_user",
-            "clear_project",
-        ):
-            raise ValueError("note command kind 无效")
 
 
 @dataclass(frozen=True, slots=True)

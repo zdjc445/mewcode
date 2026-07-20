@@ -16,6 +16,7 @@ from mewcode_agent.security.models import (
     PolicyDecision,
     RuleScope,
     SecurityConfiguration,
+    SecurityPolicyStatus,
     SecurityRequest,
     SecurityRule,
 )
@@ -41,9 +42,14 @@ class SecurityPolicyEngine:
         self._approval_store = approval_store
         self._session_rules: list[SecurityRule] = []
         self._permanent_rules = list(configuration.permanent_rules)
+        self._mode_override: PermissionMode | None = None
 
     @property
     def mode(self) -> PermissionMode:
+        return self._mode_override or self._configuration.mode
+
+    @property
+    def configured_mode(self) -> PermissionMode:
         return self._configuration.mode
 
     @property
@@ -79,12 +85,32 @@ class SecurityPolicyEngine:
             and request.category in ("write", "command")
         ):
             return PolicyDecision("allow", "request_authorized")
-        if self._configuration.mode == "strict":
+        if self.mode == "strict":
             return PolicyDecision("ask", "strict_mode_default")
-        if self._configuration.mode == "default":
+        if self.mode == "default":
             action = "allow" if request.category == "read" else "ask"
             return PolicyDecision(action, "default_mode_default")
         return PolicyDecision("allow", "permissive_mode_default")
+
+    def set_mode_override(self, mode: PermissionMode | None) -> None:
+        if mode is not None and mode not in (
+            "strict",
+            "default",
+            "permissive",
+        ):
+            raise ValueError("permission mode override 无效")
+        self._mode_override = mode
+
+    def status(self) -> SecurityPolicyStatus:
+        return SecurityPolicyStatus(
+            self._configuration.mode,
+            self.mode,
+            self._mode_override is not None,
+            len(self._configuration.user_rules),
+            len(self._configuration.project_rules),
+            len(self._permanent_rules),
+            len(self._session_rules),
+        )
 
     def allow_for_session(self, request: SecurityRequest) -> None:
         rule = self._approval_rule(request, scope="session")
