@@ -71,6 +71,10 @@ class ContextTokenEstimator:
         self._last_shape = self._shape(provider.prompt_payload(request))
         self._last_actual_prompt_tokens = result.usage.prompt_tokens
 
+    def reset_session(self) -> None:
+        self._last_shape = None
+        self._last_actual_prompt_tokens = None
+
     @staticmethod
     def _shape(payload: dict[str, Any]) -> _RequestShape:
         if not isinstance(payload, dict):

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 import inspect
+from pathlib import Path
 
 import pytest
 from textual.widgets import Button, Input, RichLog, Static, Switch
@@ -29,6 +31,7 @@ from mewcode_agent.app import ChatApp
 from mewcode_agent.compaction import ManualCompactionResult
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ChatMessage, ToolCall
+from mewcode_agent.sessions import SessionJournal, SessionManager
 from mewcode_agent.tools.base import ToolResult
 
 
@@ -238,6 +241,19 @@ class GatedManualCompactionAgentLoop:
             raise
 
 
+class RestorableAgentLoop:
+    def __init__(self) -> None:
+        self.prepare_calls = 0
+
+    async def prepare_restored_history(
+        self,
+        history: ConversationHistory,
+    ) -> None:
+        self.prepare_calls += 1
+        assert len(history.snapshot()) >= 1
+        return None
+
+
 def make_app(
     loop: object,
     history: ConversationHistory | None = None,
@@ -252,6 +268,36 @@ def make_app(
 
 def render_log_text(log: RichLog) -> str:
     return "\n".join(strip.text for strip in log.lines)
+
+
+def make_session_app(
+    tmp_path: Path,
+    loop: object,
+    *,
+    active_id: str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+) -> tuple[ChatApp, SessionManager, ConversationHistory, list[str]]:
+    history = ConversationHistory()
+    manager = SessionManager(
+        sessions_root=tmp_path / "sessions",
+        project_root=tmp_path,
+        provider_id="provider",
+        model="model",
+        history=history,
+        id_factory=lambda: active_id,
+        now_factory=lambda: datetime(2026, 7, 20, tzinfo=timezone.utc),
+    )
+    activations: list[str] = []
+    app = ChatApp(
+        loop,  # type: ignore[arg-type]
+        history,
+        provider_id="provider",
+        model="model",
+        session_manager=manager,
+        session_activator=lambda recovery: activations.append(
+            recovery.meta.session_id
+        ),
+    )
+    return app, manager, history, activations
 
 
 def test_app_has_no_prompt_assembly_or_provider_usage_dependency() -> None:
@@ -367,6 +413,182 @@ async def test_non_exact_compact_text_is_an_ordinary_user_message() -> None:
     assert history.snapshot()[0] == ChatMessage(
         role="user",
         content="/Compact",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sessions_command_lists_meta_without_entering_history(
+    tmp_path: Path,
+) -> None:
+    target_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    target = SessionJournal(
+        sessions_root=tmp_path / "sessions",
+        session_id=target_id,
+        project_root=tmp_path,
+        provider_id="provider",
+        model="model",
+        now_factory=lambda: datetime(2026, 7, 19, tzinfo=timezone.utc),
+    )
+    target.append(ChatMessage(role="user", content="saved title"))
+    target.close()
+    loop = RestorableAgentLoop()
+    app, _manager, history, _activations = make_session_app(tmp_path, loop)
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "/sessions"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        log_text = render_log_text(app.query_one("#chat-log", RichLog))
+        assert target_id in log_text
+        assert "saved title" in log_text.replace("\n", "")
+        assert "已列出 1 个会话" in str(
+            app.query_one("#status", Static).render()
+        )
+
+    assert history.snapshot() == []
+    assert loop.prepare_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_session_path_command_outputs_exact_absolute_path(
+    tmp_path: Path,
+) -> None:
+    target_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    target = SessionJournal(
+        sessions_root=tmp_path / "sessions",
+        session_id=target_id,
+        project_root=tmp_path,
+        provider_id="provider",
+        model="model",
+    )
+    target.append(ChatMessage(role="user", content="saved"))
+    target.close()
+    app, manager, history, _activations = make_session_app(
+        tmp_path,
+        RestorableAgentLoop(),
+    )
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = f"/session path {target_id}"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert str(manager.session_path(target_id)) in render_log_text(
+            app.query_one("#chat-log", RichLog)
+        ).replace("\n", "")
+
+    assert history.snapshot() == []
+
+
+@pytest.mark.asyncio
+async def test_resume_command_switches_history_and_runs_restoration(
+    tmp_path: Path,
+) -> None:
+    target_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    target = SessionJournal(
+        sessions_root=tmp_path / "sessions",
+        session_id=target_id,
+        project_root=tmp_path,
+        provider_id="provider",
+        model="model",
+    )
+    target.append(ChatMessage(role="user", content="restored message"))
+    target.close()
+    loop = RestorableAgentLoop()
+    app, manager, history, activations = make_session_app(tmp_path, loop)
+    history.add_user("current message")
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = f"/resume {target_id}"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert "会话已恢复" in str(
+            app.query_one("#status", Static).render()
+        )
+        assert "restored message" in render_log_text(
+            app.query_one("#chat-log", RichLog)
+        )
+
+    assert manager.active_session_id == target_id
+    assert history.snapshot() == [
+        ChatMessage(role="user", content="restored message")
+    ]
+    assert activations == [target_id]
+    assert loop.prepare_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_command_requires_modal_confirmation(
+    tmp_path: Path,
+) -> None:
+    target_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    target = SessionJournal(
+        sessions_root=tmp_path / "sessions",
+        session_id=target_id,
+        project_root=tmp_path,
+        provider_id="provider",
+        model="model",
+    )
+    target.append(ChatMessage(role="user", content="delete title"))
+    target.close()
+    target_path = tmp_path / "sessions" / target_id
+    app, _manager, history, _activations = make_session_app(
+        tmp_path,
+        RestorableAgentLoop(),
+    )
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = f"/session delete {target_id}"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        screen_text = "\n".join(
+            str(widget.render()) for widget in app.screen.query(Static)
+        )
+        assert target_id in screen_text
+        assert "delete title" in screen_text
+        assert str(target_path.resolve()) in screen_text
+        assert target_path.exists()
+
+        await pilot.click("#confirm-session-delete")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert not target_path.exists()
+        assert "会话已删除" in str(
+            app.query_one("#status", Static).render()
+        )
+
+    assert history.snapshot() == []
+
+
+@pytest.mark.asyncio
+async def test_non_exact_session_command_remains_ordinary_user_message(
+    tmp_path: Path,
+) -> None:
+    loop = GatedAgentLoop()
+    app, _manager, history, _activations = make_session_app(tmp_path, loop)
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "/Sessions"
+        await pilot.press("enter")
+        await loop.started.wait()
+        loop.release.set()
+        await app.workers.wait_for_complete()
+
+    assert history.snapshot()[0] == ChatMessage(
+        role="user",
+        content="/Sessions",
     )
 
 

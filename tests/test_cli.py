@@ -95,6 +95,51 @@ def test_cli_builds_and_runs_app_with_valid_config(
     artifact_root = tmp_path / "home" / ".mewcode-agent" / "context-artifacts"
     assert artifact_root.is_dir()
     assert tuple(artifact_root.iterdir()) == ()
+    assert not (tmp_path / "home" / ".mewcode-agent" / "sessions").exists()
+
+
+def test_cli_persists_messages_through_active_session_manager(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    home_path = tmp_path / "home"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+
+    class FakeAgentLoop:
+        def __init__(
+            self,
+            provider: object,
+            registry: ToolRegistry,
+            **_kwargs: object,
+        ) -> None:
+            del provider, registry
+
+    async def run_app(app: object) -> None:
+        app.history.add_user("persisted user")  # type: ignore[attr-defined]
+        app.history.add_assistant(  # type: ignore[attr-defined]
+            "persisted assistant"
+        )
+
+    monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
+
+    assert cli.main() == 0
+    sessions_root = home_path / ".mewcode-agent" / "sessions"
+    directories = tuple(sessions_root.iterdir())
+    assert len(directories) == 1
+    lines = (directories[0] / "messages.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(lines) == 2
+    assert '"content":"persisted user"' in lines[0]
+    assert '"content":"persisted assistant"' in lines[1]
 
 
 def test_cli_reports_invalid_security_config(

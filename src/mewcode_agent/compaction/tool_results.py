@@ -71,6 +71,9 @@ class ToolResultCompactor:
             compacted_total,
         )
 
+    def reset_session(self) -> None:
+        self._processed_batch_ends.clear()
+
     @staticmethod
     def _find_batches(messages: list[ChatMessage]) -> tuple[_ToolBatch, ...]:
         batches: list[_ToolBatch] = []

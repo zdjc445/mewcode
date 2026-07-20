@@ -8,6 +8,7 @@ from mewcode_agent.compaction.manager import (
     ContextProjector,
     ContextWindowManager,
     ManualCompactionResult,
+    RestoredHistoryPreparation,
     history_atomic_boundaries,
 )
 from mewcode_agent.compaction.models import (
@@ -43,6 +44,7 @@ __all__ = [
     "ContextWindowManager",
     "SummaryGeneration",
     "ManualCompactionResult",
+    "RestoredHistoryPreparation",
     "SummarySections",
     "ToolCompactionResult",
     "ToolResultCompactor",

@@ -37,6 +37,7 @@ from mewcode_agent.compaction import (
     ContextPreparation,
     ContextWindowManager,
     ManualCompactionResult,
+    RestoredHistoryPreparation,
 )
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ThinkingBlock, ToolCall
@@ -170,6 +171,49 @@ class AgentLoop:
                 "context_summary_failed",
                 "无法生成上下文压缩请求",
             ) from exc
+
+    def reset_session(
+        self,
+        *,
+        session_controls: tuple[RuntimeInstruction, ...],
+    ) -> None:
+        if self._context_window_manager is not None:
+            self._context_window_manager.reset_session()
+        self._prompt_runtime.reset_session(
+            session_controls=session_controls,
+        )
+
+    async def prepare_restored_history(
+        self,
+        history: ConversationHistory,
+    ) -> RestoredHistoryPreparation | None:
+        manager = self._context_window_manager
+        if manager is None:
+            return None
+        tools = tuple(self._registry.api_tools(self._provider.protocol))
+
+        def record_usage(
+            generation: int,
+            result: ProviderUsageResult,
+        ) -> None:
+            if self._usage_collector is not None:
+                self._usage_collector.record(
+                    CompactionUsageRecord(
+                        self._provider.provider_id,
+                        generation,
+                        result,
+                    )
+                )
+
+        return await manager.prepare_restored_history(
+            history,
+            compose_frame=lambda: self._prompt_composer.compose(
+                history.snapshot(),
+                self._prompt_runtime.timeline(),
+            ),
+            tools=tools,
+            on_summary_usage=record_usage,
+        )
 
     async def run(
         self,

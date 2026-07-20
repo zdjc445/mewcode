@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -34,6 +35,14 @@ from mewcode_agent.agent import (
 )
 from mewcode_agent.compaction import ContextCompactionError
 from mewcode_agent.history import ConversationHistory
+from mewcode_agent.sessions import (
+    SessionCommand,
+    SessionDeleteTarget,
+    SessionError,
+    SessionManager,
+    SessionRecovery,
+    parse_session_command,
+)
 
 
 class ToolApprovalScreen(ModalScreen[ToolApprovalDecision | None]):
@@ -218,6 +227,70 @@ class PlanApprovalScreen(ModalScreen[PlanApprovalResolution | None]):
         self.dismiss(None)
 
 
+class SessionDeleteScreen(ModalScreen[bool]):
+    """Require explicit confirmation before deleting one saved session."""
+
+    BINDINGS = [("escape", "cancel_delete", "取消删除")]
+
+    CSS = """
+    SessionDeleteScreen {
+        align: center middle;
+        background: $background 60%;
+    }
+
+    #session-delete-card {
+        width: 80;
+        height: auto;
+        max-height: 80%;
+        padding: 1 2;
+        border: round $error;
+        background: $surface;
+    }
+
+    #session-delete-actions {
+        height: auto;
+        margin-top: 1;
+    }
+
+    #session-delete-actions Button {
+        margin-right: 1;
+    }
+    """
+
+    def __init__(self, target: SessionDeleteTarget) -> None:
+        super().__init__()
+        self._target = target
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="session-delete-card"):
+            yield Static("删除会话（不可恢复）")
+            yield Static(f"session ID：{self._target.session_id}")
+            yield Static(f"标题：{self._target.title}")
+            yield Static(f"路径：{self._target.path}")
+            with Horizontal(id="session-delete-actions"):
+                yield Button(
+                    "确认删除",
+                    id="confirm-session-delete",
+                    variant="error",
+                )
+                yield Button(
+                    "取消",
+                    id="cancel-session-delete",
+                    variant="primary",
+                )
+
+    @on(Button.Pressed, "#confirm-session-delete")
+    def confirm_delete(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#cancel-session-delete")
+    def cancel_delete(self) -> None:
+        self.dismiss(False)
+
+    def action_cancel_delete(self) -> None:
+        self.dismiss(False)
+
+
 class ChatApp(App[None]):
     """Consume AgentLoop events in a single-session terminal UI."""
 
@@ -262,16 +335,26 @@ class ChatApp(App[None]):
         *,
         provider_id: str,
         model: str,
+        session_manager: SessionManager | None = None,
+        session_activator: Callable[[SessionRecovery], None] | None = None,
     ) -> None:
         super().__init__()
+        if (session_manager is None) != (session_activator is None):
+            raise ValueError(
+                "session_manager 与 session_activator 必须同时提供"
+            )
         self.agent_loop = agent_loop
         self.history = history
         self.provider_id = provider_id
         self.model = model
+        self.session_manager = session_manager
+        self._session_activator = session_activator
         self.active_response = ""
         self.active_thinking = ""
+        self._command_output: list[str] = []
         self._active_context: AgentRunContext | None = None
         self._active_compaction_worker: Worker[None] | None = None
+        self._active_session_worker: Worker[None] | None = None
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="chat-log", wrap=True, markup=False)
@@ -317,6 +400,12 @@ class ChatApp(App[None]):
             log.write(f"Thinking: {self.active_thinking}")
         if self.active_response:
             log.write(f"Assistant: {self.active_response}")
+        for line in self._command_output:
+            log.write(f"MewCode: {line}")
+
+    def _show_command_output(self, *lines: str) -> None:
+        self._command_output.extend(lines)
+        self._render_transcript()
 
     @on(Input.Submitted, "#prompt-input")
     def submit_prompt(self, event: Input.Submitted) -> None:
@@ -327,6 +416,20 @@ class ChatApp(App[None]):
             return
 
         plan_switch = self.query_one("#plan-only-switch", Switch)
+        session_command = (
+            parse_session_command(prompt)
+            if self.session_manager is not None
+            else None
+        )
+        if session_command is not None:
+            self._clear_active_output()
+            prompt_input.disabled = True
+            plan_switch.disabled = True
+            self._set_status("正在处理会话命令")
+            self._active_session_worker = self.run_session_command(
+                session_command
+            )
+            return
         if prompt == "/compact":
             self._clear_active_output()
             prompt_input.disabled = True
@@ -356,12 +459,108 @@ class ChatApp(App[None]):
                 context=context,
             ):
                 await self._handle_agent_event(event, context)
+        except SessionError as exc:
+            self._clear_active_output()
+            self._render_transcript()
+            self._set_status(
+                f"错误：{exc.message}（{exc.code}）"
+            )
         except Exception:
             self._clear_active_output()
             self._render_transcript()
             self._set_status("错误：Agent 运行失败")
         finally:
             self._active_context = None
+            prompt_input.disabled = False
+            plan_switch.disabled = False
+            prompt_input.focus()
+
+    @work(exclusive=True, exit_on_error=False)
+    async def run_session_command(self, command: SessionCommand) -> None:
+        prompt_input = self.query_one("#prompt-input", Input)
+        plan_switch = self.query_one("#plan-only-switch", Switch)
+        manager = self.session_manager
+        assert manager is not None
+        try:
+            if command.kind == "list":
+                metas = await asyncio.to_thread(manager.list_sessions)
+                if metas:
+                    self._show_command_output(
+                        *(
+                            f"{meta.session_id} | {meta.updated_at} | "
+                            f"{meta.title} | {meta.summary}"
+                            for meta in metas
+                        )
+                    )
+                    self._set_status(f"已列出 {len(metas)} 个会话")
+                else:
+                    self._show_command_output("当前项目没有已保存会话")
+                    self._set_status("会话列表为空")
+                return
+
+            assert command.session_id is not None
+            if command.kind == "path":
+                path = await asyncio.to_thread(
+                    manager.session_path,
+                    command.session_id,
+                )
+                self._show_command_output(str(path))
+                self._set_status("已显示会话路径")
+                return
+            if command.kind == "delete":
+                target = await asyncio.to_thread(
+                    manager.prepare_delete,
+                    command.session_id,
+                )
+                confirmed = await self.push_screen_wait(
+                    SessionDeleteScreen(target)
+                )
+                if not confirmed:
+                    self._set_status("已取消删除会话")
+                    return
+                await asyncio.to_thread(manager.delete, target)
+                self._show_command_output(
+                    f"已删除会话 {target.session_id}：{target.path}"
+                )
+                self._set_status("会话已删除")
+                return
+
+            assert command.kind == "resume"
+            assert self._session_activator is not None
+            recovery = await manager.resume_async(
+                command.session_id,
+                activate=self._session_activator,
+            )
+            self._clear_active_output()
+            self._render_transcript()
+            try:
+                preparation = await self.agent_loop.prepare_restored_history(
+                    self.history
+                )
+            except ContextCompactionError as exc:
+                self._render_transcript()
+                self._set_status(
+                    "会话已恢复；恢复上下文处理失败："
+                    f"{exc.code}"
+                )
+                return
+            details = (
+                f"消息={len(recovery.messages)}，"
+                f"修复={'是' if recovery.repaired else '否'}，"
+                f"诊断={len(recovery.diagnostics)}"
+            )
+            if preparation is not None and preparation.summary_changed:
+                details += "，已执行恢复压缩"
+            self._set_status(f"会话已恢复：{details}")
+        except SessionError as exc:
+            self._set_status(f"会话命令失败：{exc.message}（{exc.code}）")
+        except Exception:
+            self._set_status(
+                "会话命令失败：会话恢复或运行时重置失败"
+                "（session_resume_failed）"
+            )
+        finally:
+            self._active_session_worker = None
             prompt_input.disabled = False
             plan_switch.disabled = False
             prompt_input.focus()

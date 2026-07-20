@@ -46,6 +46,11 @@ from mewcode_agent.security import (
     SecurityPolicyEngine,
     load_security_configuration,
 )
+from mewcode_agent.sessions import (
+    SessionError,
+    SessionManager,
+    SessionRecovery,
+)
 from mewcode_agent.tools.registry import create_core_registry
 
 CONFIG_FILENAME = "llm_providers.yaml"
@@ -66,6 +71,7 @@ async def run_application() -> int:
 
     mcp_manager: McpConnectionManager | None = None
     artifact_store: ContextArtifactStore | None = None
+    session_manager: SessionManager | None = None
     try:
         session_environment = collect_session_environment()
         working_directory = Path(
@@ -120,6 +126,14 @@ async def run_application() -> int:
             permanent_rules=permanent_rules,
         )
         provider_config = config.active_provider
+        history = ConversationHistory()
+        session_manager = SessionManager(
+            sessions_root=user_config_directory / "sessions",
+            project_root=working_directory,
+            provider_id=provider_config.provider_id,
+            model=provider_config.model,
+            history=history,
+        )
         provider = create_provider(provider_config, config.api_key)
         compaction_config = CompactionConfig()
         artifact_store = ContextArtifactStore(
@@ -179,13 +193,18 @@ async def run_application() -> int:
         ProviderError,
         McpError,
         ContextCompactionError,
+        SessionError,
     ) as exc:
         try:
-            if mcp_manager is not None:
-                await mcp_manager.close()
+            if session_manager is not None:
+                session_manager.close()
         finally:
-            if artifact_store is not None:
-                await artifact_store.close()
+            try:
+                if mcp_manager is not None:
+                    await mcp_manager.close()
+            finally:
+                if artifact_store is not None:
+                    await artifact_store.close()
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
     try:
@@ -197,21 +216,42 @@ async def run_application() -> int:
             scheduler=scheduler,
             context_window_manager=context_window_manager,
         )
+        assert session_manager is not None
+
+        def activate_session(recovery: SessionRecovery) -> None:
+            documents = load_instruction_documents(
+                user_root=user_config_directory,
+                project_root=working_directory,
+            )
+            controls = tuple(
+                document.to_runtime_instruction() for document in documents
+            )
+            gap = session_manager.resume_gap_instruction(recovery.meta)
+            if gap is not None:
+                controls = (*controls, gap)
+            agent_loop.reset_session(session_controls=controls)
+
         app = ChatApp(
             agent_loop,
-            ConversationHistory(),
+            history,
             provider_id=provider_config.provider_id,
             model=provider_config.model,
+            session_manager=session_manager,
+            session_activator=activate_session,
         )
         await app.run_async()
         return 0
     finally:
         assert mcp_manager is not None
         assert artifact_store is not None
+        assert session_manager is not None
         try:
-            await mcp_manager.close()
+            session_manager.close()
         finally:
-            await artifact_store.close()
+            try:
+                await mcp_manager.close()
+            finally:
+                await artifact_store.close()
 
 
 def main() -> int:

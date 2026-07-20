@@ -103,3 +103,29 @@ def test_estimator_falls_back_when_tools_change() -> None:
     estimate = estimator.estimate(provider, changed)  # type: ignore[arg-type]
 
     assert estimate.used_actual_baseline is False
+
+
+def test_estimator_reset_discards_previous_session_baseline() -> None:
+    provider = PayloadProvider()
+    estimator = ContextTokenEstimator(
+        config=CompactionConfig(framing_safety_tokens=10)
+    )
+    request = ProviderRequest(
+        "system",
+        (ChatMessage(role="user", content="问题"),),
+        None,
+    )
+    estimator.record_usage(
+        provider,  # type: ignore[arg-type]
+        request,
+        ProviderUsageResult(
+            "available",
+            ProviderUsage(100, 0, 100, 1),
+            None,
+        ),
+    )
+    estimator.reset_session()
+
+    estimate = estimator.estimate(provider, request)  # type: ignore[arg-type]
+
+    assert estimate.used_actual_baseline is False

@@ -29,6 +29,30 @@ class PromptRuntime:
         session_controls: tuple[RuntimeInstruction, ...] = (),
     ) -> None:
         self._collector = request_environment_collector
+        self._session_environment = session_environment
+        self._validate_session_controls(session_controls)
+        self._reset_timeline(session_controls)
+
+    @staticmethod
+    def _validate_session_controls(
+        session_controls: tuple[RuntimeInstruction, ...],
+    ) -> None:
+        if not isinstance(session_controls, tuple):
+            raise ValueError("session_controls 必须是 tuple")
+        seen: set[str] = set()
+        for instruction in session_controls:
+            if not isinstance(instruction, RuntimeInstruction):
+                raise ValueError("session_controls 元素类型无效")
+            if instruction.scope != "session":
+                raise ValueError("session_controls 只接受 scope=session")
+            if instruction.instruction_id in seen:
+                raise ValueError("session_controls instruction_id 不能重复")
+            seen.add(instruction.instruction_id)
+
+    def _reset_timeline(
+        self,
+        session_controls: tuple[RuntimeInstruction, ...],
+    ) -> None:
         self._timeline: list[ControlMessage] = []
         self._ids: set[str] = set()
         self._sequence = 0
@@ -42,15 +66,23 @@ class PromptRuntime:
                 "runtime.environment.session",
                 "context",
                 "session",
-                session_environment.to_json(),
+                self._session_environment.to_json(),
                 "environment",
             ),
             anchor=0,
         )
         for instruction in session_controls:
-            if instruction.scope != "session":
-                raise ValueError("session_controls 只接受 scope=session")
             self._append(instruction, anchor=0)
+
+    def reset_session(
+        self,
+        *,
+        session_controls: tuple[RuntimeInstruction, ...] = (),
+    ) -> None:
+        if self._active_request is not None or self._active_round is not None:
+            raise RuntimeError("活动 request 或 round 期间不能重置 session")
+        self._validate_session_controls(session_controls)
+        self._reset_timeline(session_controls)
 
     @staticmethod
     def _history_length(value: int) -> int:

@@ -214,6 +214,14 @@ class ManualCompactionResult:
     estimate_after: int
 
 
+@dataclass(frozen=True, slots=True)
+class RestoredHistoryPreparation:
+    estimate_before: int
+    estimate_after: int
+    compaction: ToolCompactionResult
+    summary_changed: bool
+
+
 class ContextWindowManager:
     """Run preventive tool compaction before transactional summarization."""
 
@@ -521,6 +529,57 @@ class ContextWindowManager:
         result: ProviderUsageResult,
     ) -> None:
         self._estimator.record_usage(self._provider, request, result)
+
+    def reset_session(self) -> None:
+        if self._summary_lock.locked():
+            raise RuntimeError("上下文摘要运行期间不能重置 session")
+        self._tool_result_compactor.reset_session()
+        self._estimator.reset_session()
+        self._checkpoint = None
+        self._consecutive_summary_failures = 0
+        self._auto_compaction_disabled = False
+        self._auto_warning_emitted = False
+        self._last_auto_attempt_request_sequence = None
+
+    async def prepare_restored_history(
+        self,
+        history: ConversationHistory,
+        *,
+        compose_frame: Callable[[], PromptFrame],
+        tools: tuple[dict[str, Any], ...] | None,
+        on_summary_usage: ContextSummaryUsageHandler | None = None,
+    ) -> RestoredHistoryPreparation:
+        compaction = await self.compact_tool_results(history)
+        frame = compose_frame()
+        request = ProviderRequest(frame.system_prompt, frame.items, tools)
+        before = self._estimator.estimate(self._provider, request)
+        if before.estimated_prompt_tokens < self._prompt_budget_tokens:
+            return RestoredHistoryPreparation(
+                before.estimated_prompt_tokens,
+                before.estimated_prompt_tokens,
+                compaction,
+                False,
+            )
+        result = await self.compact_now(
+            history,
+            compose_frame=compose_frame,
+            tools=tools,
+            on_summary_usage=on_summary_usage,
+        )
+        if (
+            not result.changed
+            or result.estimate_after >= self._prompt_budget_tokens
+        ):
+            raise ContextCompactionError(
+                "context_window_exceeded",
+                "恢复历史超过模型 Prompt 预算且无法压缩",
+            )
+        return RestoredHistoryPreparation(
+            result.estimate_before,
+            result.estimate_after,
+            compaction,
+            True,
+        )
 
     def _new_boundaries(
         self,

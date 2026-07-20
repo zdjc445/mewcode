@@ -54,6 +54,7 @@ class MeasureProvider:
 @dataclass
 class StubToolCompactor:
     calls: int = 0
+    reset_calls: int = 0
 
     async def compact(
         self,
@@ -61,6 +62,9 @@ class StubToolCompactor:
     ) -> ToolCompactionResult:
         self.calls += 1
         return ToolCompactionResult(0, 0, 0, 0)
+
+    def reset_session(self) -> None:
+        self.reset_calls += 1
 
 
 class StubSummarizer:
@@ -121,6 +125,9 @@ class SequencedEstimator:
     ) -> None:
         del provider, request, result
 
+    def reset_session(self) -> None:
+        return None
+
 
 def manager_config() -> CompactionConfig:
     return CompactionConfig(
@@ -157,6 +164,81 @@ def make_manager(
         max_tokens=100,
         config=manager_config(),
     )
+
+
+def test_reset_session_clears_checkpoint_failures_and_compactor_state() -> None:
+    summarizer = StubSummarizer()
+    compactor = StubToolCompactor()
+    manager = make_manager(summarizer, compactor)
+    manager._consecutive_summary_failures = 2
+    manager._auto_compaction_disabled = True
+    manager._auto_warning_emitted = True
+    manager._last_auto_attempt_request_sequence = 8
+
+    manager.reset_session()
+
+    assert manager.checkpoint is None
+    assert manager.consecutive_summary_failures == 0
+    assert manager.auto_compaction_disabled is False
+    assert compactor.reset_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_restored_history_below_budget_only_runs_layer_one() -> None:
+    history = populated_history()
+    summarizer = StubSummarizer()
+    compactor = StubToolCompactor()
+    manager = ContextWindowManager(
+        MeasureProvider(),  # type: ignore[arg-type]
+        compactor,  # type: ignore[arg-type]
+        summarizer,  # type: ignore[arg-type]
+        context_window_tokens=3000,
+        max_tokens=100,
+        estimator=SequencedEstimator((2800,)),  # type: ignore[arg-type]
+        config=manager_config(),
+    )
+
+    result = await manager.prepare_restored_history(
+        history,
+        compose_frame=frame_factory(history),
+        tools=None,
+    )
+
+    assert result.estimate_before == 2800
+    assert result.estimate_after == 2800
+    assert result.summary_changed is False
+    assert compactor.calls == 1
+    assert summarizer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_restored_history_at_budget_runs_one_summary_attempt() -> None:
+    history = populated_history()
+    summarizer = StubSummarizer()
+    compactor = StubToolCompactor()
+    manager = ContextWindowManager(
+        MeasureProvider(),  # type: ignore[arg-type]
+        compactor,  # type: ignore[arg-type]
+        summarizer,  # type: ignore[arg-type]
+        context_window_tokens=3000,
+        max_tokens=100,
+        estimator=SequencedEstimator(  # type: ignore[arg-type]
+            (2900, 2900, 1000, 900)
+        ),
+        config=manager_config(),
+    )
+
+    result = await manager.prepare_restored_history(
+        history,
+        compose_frame=frame_factory(history),
+        tools=None,
+    )
+
+    assert result.estimate_before == 2900
+    assert result.estimate_after == 900
+    assert result.summary_changed is True
+    assert compactor.calls == 2
+    assert len(summarizer.calls) == 1
 
 
 @pytest.mark.asyncio

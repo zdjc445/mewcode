@@ -35,6 +35,12 @@ SessionDiagnosticCode: TypeAlias = Literal[
     "session_line_sequence_not_increasing",
     "session_tool_batch_invalid",
 ]
+SessionCommandKind: TypeAlias = Literal[
+    "list",
+    "resume",
+    "path",
+    "delete",
+]
 
 _ERROR_MESSAGES: dict[SessionErrorCode, str] = {
     "session_write_failed": "会话消息或元数据写入失败",
@@ -371,3 +377,32 @@ class SessionRecovery:
             raise ValueError("diagnostics 必须是 SessionDiagnostic tuple")
         if type(self.repaired) is not bool:
             raise ValueError("repaired 必须是布尔值")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionCommand:
+    kind: SessionCommandKind
+    session_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("list", "resume", "path", "delete"):
+            raise ValueError("session command kind 无效")
+        if self.kind == "list":
+            if self.session_id is not None:
+                raise ValueError("list command 不能包含 session_id")
+        else:
+            validate_session_id(self.session_id)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionDeleteTarget:
+    session_id: str
+    title: str
+    path: Path
+
+    def __post_init__(self) -> None:
+        validate_session_id(self.session_id)
+        if not isinstance(self.title, str) or not self.title:
+            raise ValueError("title 必须是非空字符串")
+        if not isinstance(self.path, Path) or not self.path.is_absolute():
+            raise ValueError("path 必须是绝对 Path")

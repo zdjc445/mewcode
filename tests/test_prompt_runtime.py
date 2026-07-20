@@ -96,6 +96,50 @@ def test_session_controls_reject_non_session_scope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reset_session_clears_timeline_and_request_counter() -> None:
+    runtime = make_runtime()
+    assert await runtime.begin_request(
+        history_length=0,
+        mode="executing",
+    ) == 1
+    runtime.end_request()
+
+    runtime.reset_session(
+        session_controls=(
+            RuntimeInstruction(
+                "runtime.instructions.project",
+                "instruction",
+                "session",
+                "new project rule",
+                "project",
+            ),
+        )
+    )
+
+    assert [item.instruction_id for item in runtime.timeline()] == [
+        "runtime.environment.session",
+        "runtime.instructions.project",
+    ]
+    assert [item.sequence for item in runtime.timeline()] == [1, 2]
+    assert await runtime.begin_request(
+        history_length=0,
+        mode="executing",
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_reset_session_rejects_active_request_without_mutation() -> None:
+    runtime = make_runtime()
+    await runtime.begin_request(history_length=0, mode="executing")
+    before = runtime.timeline()
+
+    with pytest.raises(RuntimeError, match="活动 request"):
+        runtime.reset_session()
+
+    assert runtime.timeline() == before
+
+
+@pytest.mark.asyncio
 async def test_execution_request_and_round_use_fixed_order() -> None:
     runtime = make_runtime()
 
