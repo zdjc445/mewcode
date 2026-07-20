@@ -54,6 +54,7 @@ class PromptRuntime:
         session_controls: tuple[RuntimeInstruction, ...],
     ) -> None:
         self._timeline: list[ControlMessage] = []
+        self._dynamic_session_controls: tuple[RuntimeInstruction, ...] = ()
         self._ids: set[str] = set()
         self._sequence = 0
         self._request_counter = 0
@@ -83,6 +84,26 @@ class PromptRuntime:
             raise RuntimeError("活动 request 或 round 期间不能重置 session")
         self._validate_session_controls(session_controls)
         self._reset_timeline(session_controls)
+
+    def replace_dynamic_session_controls(
+        self,
+        controls: tuple[RuntimeInstruction, ...],
+    ) -> None:
+        """Replace runtime-owned session controls without touching history."""
+
+        self._validate_session_controls(controls)
+        static_ids = {message.instruction_id for message in self._timeline}
+        conflict = next(
+            (
+                control.instruction_id
+                for control in controls
+                if control.instruction_id in static_ids
+            ),
+            None,
+        )
+        if conflict is not None:
+            raise ValueError(f"dynamic session control id 冲突: {conflict}")
+        self._dynamic_session_controls = controls
 
     @staticmethod
     def _history_length(value: int) -> int:
@@ -281,7 +302,41 @@ class PromptRuntime:
         self._last_round = 0
 
     def timeline(self) -> tuple[ControlMessage, ...]:
-        return tuple(self._timeline)
+        if not self._dynamic_session_controls:
+            return tuple(self._timeline)
+        base_end = 0
+        for message in self._timeline:
+            if message.scope != "session" or message.anchor != 0:
+                break
+            base_end += 1
+        combined: list[ControlMessage] = list(self._timeline[:base_end])
+        for instruction in self._dynamic_session_controls:
+            combined.append(
+                ControlMessage(
+                    instruction.instruction_id,
+                    instruction.kind,
+                    instruction.scope,
+                    instruction.content,
+                    1,
+                    0,
+                    None,
+                    None,
+                )
+            )
+        combined.extend(self._timeline[base_end:])
+        return tuple(
+            ControlMessage(
+                message.instruction_id,
+                message.kind,
+                message.scope,
+                message.content,
+                sequence,
+                message.anchor,
+                message.request_sequence,
+                message.round_number,
+            )
+            for sequence, message in enumerate(combined, start=1)
+        )
 
     @property
     def active_request_sequence(self) -> int | None:

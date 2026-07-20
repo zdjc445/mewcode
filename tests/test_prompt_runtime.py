@@ -96,6 +96,89 @@ def test_session_controls_reject_non_session_scope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dynamic_session_controls_replace_during_active_request() -> None:
+    runtime = make_runtime()
+    await runtime.begin_request(history_length=0, mode="executing")
+    before_ids = [item.instruction_id for item in runtime.timeline()]
+
+    runtime.replace_dynamic_session_controls(
+        (
+            RuntimeInstruction(
+                "runtime.skills.catalog",
+                "context",
+                "session",
+                "skill catalog",
+                "skill",
+            ),
+        )
+    )
+
+    timeline = runtime.timeline()
+    assert [item.instruction_id for item in timeline] == [
+        "runtime.environment.session",
+        "runtime.skills.catalog",
+        *before_ids[1:],
+    ]
+    assert [item.sequence for item in timeline] == list(
+        range(1, len(timeline) + 1)
+    )
+    assert [item.anchor for item in timeline[:2]] == [0, 0]
+
+    runtime.replace_dynamic_session_controls(
+        (
+            RuntimeInstruction(
+                "runtime.skills.replacement",
+                "context",
+                "session",
+                "replacement",
+                "skill",
+            ),
+        )
+    )
+    assert "runtime.skills.catalog" not in {
+        item.instruction_id for item in runtime.timeline()
+    }
+
+
+def test_dynamic_session_controls_are_cleared_by_session_reset() -> None:
+    runtime = make_runtime()
+    runtime.replace_dynamic_session_controls(
+        (
+            RuntimeInstruction(
+                "runtime.skills.catalog",
+                "context",
+                "session",
+                "skill catalog",
+                "skill",
+            ),
+        )
+    )
+
+    runtime.reset_session()
+
+    assert [item.instruction_id for item in runtime.timeline()] == [
+        "runtime.environment.session"
+    ]
+
+
+def test_dynamic_session_controls_reject_static_id_collision() -> None:
+    runtime = make_runtime()
+
+    with pytest.raises(ValueError, match="冲突"):
+        runtime.replace_dynamic_session_controls(
+            (
+                RuntimeInstruction(
+                    "runtime.environment.session",
+                    "context",
+                    "session",
+                    "collision",
+                    "skill",
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_reset_session_clears_timeline_and_request_counter() -> None:
     runtime = make_runtime()
     assert await runtime.begin_request(

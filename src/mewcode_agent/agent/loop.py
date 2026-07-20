@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -118,6 +118,7 @@ class AgentLoop:
         scheduler: ToolScheduler | None = None,
         usage_collector: UsageCollector | None = None,
         context_window_manager: ContextWindowManager | None,
+        visible_tool_names: Callable[[], frozenset[str] | None] | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -127,6 +128,15 @@ class AgentLoop:
         self._scheduler = scheduler or ToolScheduler(registry)
         self._usage_collector = usage_collector
         self._context_window_manager = context_window_manager
+        self._visible_tool_names_provider = visible_tool_names
+
+    def _visible_tool_names(self) -> frozenset[str] | None:
+        if self._visible_tool_names_provider is None:
+            return None
+        value = self._visible_tool_names_provider()
+        if value is not None and not isinstance(value, frozenset):
+            raise ValueError("visible_tool_names provider 返回值无效")
+        return value
 
     async def compact_history(
         self,
@@ -141,7 +151,12 @@ class AgentLoop:
                 "当前 Agent 未配置上下文压缩",
             )
         try:
-            tools = tuple(self._registry.api_tools(self._provider.protocol))
+            tools = tuple(
+                self._registry.api_tools(
+                    self._provider.protocol,
+                    visible_names=self._visible_tool_names(),
+                )
+            )
 
             def record_usage(
                 generation: int,
@@ -180,7 +195,12 @@ class AgentLoop:
         manager = self._context_window_manager
         if manager is None:
             return None
-        tools = tuple(self._registry.api_tools(self._provider.protocol))
+        tools = tuple(
+            self._registry.api_tools(
+                self._provider.protocol,
+                visible_names=self._visible_tool_names(),
+            )
+        )
         frame = self._prompt_composer.compose(
             history.snapshot(),
             self._prompt_runtime.timeline(),
@@ -205,7 +225,12 @@ class AgentLoop:
         manager = self._context_window_manager
         if manager is None:
             return None
-        tools = tuple(self._registry.api_tools(self._provider.protocol))
+        tools = tuple(
+            self._registry.api_tools(
+                self._provider.protocol,
+                visible_names=self._visible_tool_names(),
+            )
+        )
 
         def record_usage(
             generation: int,
@@ -295,11 +320,13 @@ class AgentLoop:
                         )
                         round_started = True
                         self._prompt_runtime.seal_round()
+                        visible_names = self._visible_tool_names()
                         api_tools = (
                             None
                             if is_final_round
                             else self._registry.api_tools(
-                                self._provider.protocol
+                                self._provider.protocol,
+                                visible_names=visible_names,
                             )
                         )
                         tools = (
@@ -477,6 +504,7 @@ class AgentLoop:
                                 current_request_authorized
                             ),
                             context=context,
+                            visible_names=visible_names,
                         ):
                             if isinstance(event, ToolResultEvent):
                                 history.add_tool_result(

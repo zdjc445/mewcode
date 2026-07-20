@@ -150,6 +150,10 @@ class ToolRegistry:
     def tool_names(self) -> tuple[str, ...]:
         return tuple(self._tools)
 
+    def non_skill_tool_names(self) -> tuple[str, ...]:
+        skill_names = {tool.name for tool in self._skill_tools}
+        return tuple(name for name in self._tools if name not in skill_names)
+
     def api_tools(
         self,
         protocol: ToolProtocol,

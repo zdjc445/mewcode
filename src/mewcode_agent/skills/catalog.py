@@ -100,7 +100,7 @@ def _scan_layer(
     return valid, diagnostics
 
 
-def _validate_final(
+def validate_skill_definitions(
     definitions: Iterable[SkillDefinition],
     *,
     existing_tool_names: frozenset[str],
@@ -161,7 +161,7 @@ def scan_skill_catalog(
         selected.update(layer)
         diagnostics.extend(layer_diagnostics)
     definitions = tuple(selected[name] for name in sorted(selected))
-    _validate_final(
+    validate_skill_definitions(
         definitions,
         existing_tool_names=frozenset(existing_tool_names),
         reserved_command_names=frozenset(reserved_command_names),
@@ -214,3 +214,25 @@ class SkillCatalog:
                 "Skill 源文件名称已改变，请执行 /skills rescan",
             )
         return refreshed
+
+    def prepare_reload(
+        self,
+        name: str,
+        *,
+        existing_tool_names: frozenset[str],
+        reserved_command_names: frozenset[str],
+    ) -> tuple[SkillCatalogSnapshot, SkillDefinition]:
+        refreshed = self.reload(name)
+        definitions = tuple(
+            refreshed if item.name == name else item
+            for item in self._snapshot.definitions
+        )
+        validate_skill_definitions(
+            definitions,
+            existing_tool_names=existing_tool_names,
+            reserved_command_names=reserved_command_names,
+        )
+        return (
+            SkillCatalogSnapshot(definitions, self._snapshot.diagnostics),
+            refreshed,
+        )

@@ -77,6 +77,41 @@ class RecordingTool(Tool):
         return {"executions": self.executions}
 
 
+@pytest.mark.asyncio
+async def test_hidden_registered_tool_is_rejected_before_execution() -> None:
+    hidden = RecordingTool("hidden", "read")
+    visible = RecordingTool("visible", "read")
+    registry = ToolRegistry()
+    register_all(registry, hidden, visible)
+    scheduler = ToolScheduler(registry)
+    context = AgentRunContext()
+    context.begin_run()
+
+    events = [
+        event
+        async for event in scheduler.run(
+            (
+                ToolCall("hidden_call", "hidden", "{}"),
+                ToolCall("visible_call", "visible", "{}"),
+            ),
+            plan_only=False,
+            current_request_authorized=False,
+            context=context,
+            visible_names=frozenset({"visible"}),
+        )
+    ]
+
+    results = [
+        event.result
+        for event in events
+        if isinstance(event, ToolResultEvent)
+    ]
+    assert results[0].error_code == "tool_not_visible"
+    assert results[1].success is True
+    assert hidden.executions == 0
+    assert visible.executions == 1
+
+
 def register_all(registry: ToolRegistry, *tools: Tool) -> None:
     for tool in tools:
         registry.register(tool)

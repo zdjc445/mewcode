@@ -82,7 +82,10 @@ class ToolScheduler:
         plan_only: bool,
         current_request_authorized: bool,
         context: AgentRunContext,
+        visible_names: frozenset[str] | None = None,
     ) -> AsyncIterator[ToolSchedulerEvent]:
+        if visible_names is not None and not isinstance(visible_names, frozenset):
+            raise TypeError("visible_names 必须是 frozenset 或 None")
         index = 0
         while index < len(tool_calls):
             if context.cancelled:
@@ -91,6 +94,18 @@ class ToolScheduler:
                 return
 
             call = tool_calls[index]
+            if visible_names is not None and call.name not in visible_names:
+                yield ToolResultEvent(
+                    call.call_id,
+                    ToolResult(
+                        tool_name=call.name,
+                        success=False,
+                        error_code="tool_not_visible",
+                        error_message="工具不属于当前 Agent run 的可见集合",
+                    ),
+                )
+                index += 1
+                continue
             tool = self._registry.get(call.name)
             if tool is None:
                 result = await self._registry.execute(
@@ -106,6 +121,11 @@ class ToolScheduler:
                 group_end = index
                 while group_end < len(tool_calls):
                     grouped_call = tool_calls[group_end]
+                    if (
+                        visible_names is not None
+                        and grouped_call.name not in visible_names
+                    ):
+                        break
                     grouped_tool = self._registry.get(grouped_call.name)
                     if grouped_tool is None or grouped_tool.category != "read":
                         break

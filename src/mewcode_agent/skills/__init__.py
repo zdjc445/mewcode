@@ -16,9 +16,11 @@ from mewcode_agent.skills.models import (
     SkillToolDefinition,
 )
 from mewcode_agent.skills.tools import (
+    LoadSkillTool,
     SkillScriptTool,
     build_skill_script_tools,
 )
+from mewcode_agent.skills.runtime import ActiveSkill, SkillRuntime
 
 __all__ = [
     "SKILL_NAME_PATTERN",
@@ -30,6 +32,9 @@ __all__ = [
     "SkillDiagnostic",
     "SkillToolDefinition",
     "SkillScriptTool",
+    "LoadSkillTool",
+    "ActiveSkill",
+    "SkillRuntime",
     "builtin_skill_root",
     "load_skill_definition",
     "scan_skill_catalog",

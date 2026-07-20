@@ -6,12 +6,23 @@ import asyncio
 import json
 from pathlib import Path
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jsonschema import Draft202012Validator
 
-from mewcode_agent.skills.models import SkillDefinition, SkillToolDefinition
-from mewcode_agent.tools.base import Tool, ToolExecutionError
+from mewcode_agent.skills.models import (
+    SkillConfigError,
+    SkillDefinition,
+    SkillToolDefinition,
+)
+from mewcode_agent.tools.base import (
+    Tool,
+    ToolExecutionError,
+    validate_arguments,
+)
+
+if TYPE_CHECKING:
+    from mewcode_agent.skills.runtime import SkillRuntime
 
 
 def _reject_json_constant(value: str) -> None:
@@ -114,3 +125,39 @@ def build_skill_script_tools(
             for tool in definition.dedicated_tools
         )
     return tuple(tools)
+
+
+class LoadSkillTool(Tool):
+    """System-level control tool that loads one exact Skill."""
+
+    name = "load_skill"
+    description = (
+        "按精确名称加载一个已发现 Skill 的完整 SOP 和专属工具。"
+        "调用前只能依据 Skill 目录中的 name 与 description 选择。"
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "arguments": {"type": "string"},
+        },
+        "required": ["name", "arguments"],
+        "additionalProperties": False,
+    }
+    category = "read"
+
+    def __init__(self, runtime: "SkillRuntime") -> None:
+        self._runtime = runtime
+
+    async def execute(self, arguments: dict[str, Any]) -> Any:
+        validate_arguments(
+            arguments,
+            required={"name": str, "arguments": str},
+        )
+        try:
+            return await self._runtime.load(
+                arguments["name"],
+                arguments["arguments"],
+            )
+        except SkillConfigError as exc:
+            raise ToolExecutionError(exc.code, exc.message) from exc
