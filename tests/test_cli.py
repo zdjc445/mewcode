@@ -251,6 +251,87 @@ def test_cli_builds_prompt_dependencies_from_exact_two_layers(
     assert "user team" not in frame.system_prompt
 
 
+def test_cli_loads_project_then_user_instruction_controls(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    home_path = tmp_path / "home"
+    user_root = home_path / ".mewcode-agent"
+    user_root.mkdir(parents=True)
+    (tmp_path / "MEWCODE.md").write_text(
+        "project instruction",
+        encoding="utf-8",
+    )
+    (user_root / "INSTRUCTIONS.md").write_text(
+        "user instruction",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+    calls: list[dict[str, object]] = []
+
+    class FakeAgentLoop:
+        def __init__(
+            self,
+            provider: object,
+            registry: ToolRegistry,
+            **kwargs: object,
+        ) -> None:
+            calls.append(
+                {"provider": provider, "registry": registry, **kwargs}
+            )
+
+    async def run_app(_self: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
+
+    assert cli.main() == 0
+    runtime = calls[0]["prompt_runtime"]
+    timeline = runtime.timeline()  # type: ignore[union-attr]
+    assert [item.instruction_id for item in timeline[:3]] == [
+        "runtime.environment.session",
+        "runtime.instructions.project",
+        "runtime.instructions.user",
+    ]
+    assert [item.content for item in timeline[1:3]] == [
+        "project instruction",
+        "user instruction",
+    ]
+
+
+def test_cli_reports_instruction_error_without_file_content(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+    capsys,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    (tmp_path / "MEWCODE.md").write_text(
+        "SECRET_BODY\n@include <missing.md>",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+
+    assert cli.main() == 1
+    error = capsys.readouterr().err
+    assert "instruction_include_not_found" in error
+    assert "missing.md" in error
+    assert "SECRET_BODY" not in error
+
+
 def test_cli_reports_prompt_config_error_without_content(
     tmp_path: Path,
     valid_config_text: str,

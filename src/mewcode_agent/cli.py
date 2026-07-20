@@ -18,6 +18,10 @@ from mewcode_agent.compaction import (
 )
 from mewcode_agent.config import ConfigError, load_config
 from mewcode_agent.history import ConversationHistory
+from mewcode_agent.instructions import (
+    InstructionConfigError,
+    load_instruction_documents,
+)
 from mewcode_agent.mcp import (
     McpConnectionManager,
     McpDiagnostic,
@@ -91,6 +95,10 @@ async def run_application() -> int:
             user_path=user_prompt_path,
             project_path=project_prompt_path,
         )
+        instruction_documents = load_instruction_documents(
+            user_root=user_config_directory,
+            project_root=working_directory,
+        )
         environment_collector = GitRequestEnvironmentCollector(
             working_directory=Path(
                 session_environment.working_directory
@@ -99,6 +107,10 @@ async def run_application() -> int:
         prompt_runtime = PromptRuntime(
             session_environment,
             environment_collector,
+            session_controls=tuple(
+                document.to_runtime_instruction()
+                for document in instruction_documents
+            ),
         )
         prompt_composer = PromptComposer(modules)
         permanent_rules = approval_store.load()
@@ -160,6 +172,7 @@ async def run_application() -> int:
     except (
         ConfigError,
         SecurityConfigError,
+        InstructionConfigError,
         PromptConfigError,
         PromptEnvironmentError,
         PathSandboxError,

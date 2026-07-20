@@ -25,6 +25,8 @@ class PromptRuntime:
         self,
         session_environment: SessionEnvironment,
         request_environment_collector: RequestEnvironmentCollector,
+        *,
+        session_controls: tuple[RuntimeInstruction, ...] = (),
     ) -> None:
         self._collector = request_environment_collector
         self._timeline: list[ControlMessage] = []
@@ -45,6 +47,10 @@ class PromptRuntime:
             ),
             anchor=0,
         )
+        for instruction in session_controls:
+            if instruction.scope != "session":
+                raise ValueError("session_controls 只接受 scope=session")
+            self._append(instruction, anchor=0)
 
     @staticmethod
     def _history_length(value: int) -> int:

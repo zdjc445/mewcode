@@ -32,6 +32,69 @@ def make_runtime() -> PromptRuntime:
     )
 
 
+def test_session_controls_follow_environment_at_anchor_zero() -> None:
+    controls = (
+        RuntimeInstruction(
+            "runtime.instructions.project",
+            "instruction",
+            "session",
+            "project rule",
+            "project",
+        ),
+        RuntimeInstruction(
+            "runtime.instructions.user",
+            "instruction",
+            "session",
+            "user rule",
+            "user",
+        ),
+    )
+
+    runtime = PromptRuntime(
+        SessionEnvironment(
+            "Windows",
+            "powershell.exe",
+            "D:\\workspace",
+            "China Standard Time",
+            "+08:00",
+        ),
+        FixedRequestEnvironmentCollector(),
+        session_controls=controls,
+    )
+
+    timeline = runtime.timeline()
+    assert [item.instruction_id for item in timeline] == [
+        "runtime.environment.session",
+        "runtime.instructions.project",
+        "runtime.instructions.user",
+    ]
+    assert [item.anchor for item in timeline] == [0, 0, 0]
+    assert [item.sequence for item in timeline] == [1, 2, 3]
+
+
+def test_session_controls_reject_non_session_scope() -> None:
+    with pytest.raises(ValueError, match="scope=session"):
+        PromptRuntime(
+            SessionEnvironment(
+                "Windows",
+                "powershell.exe",
+                "D:\\workspace",
+                "China Standard Time",
+                "+08:00",
+            ),
+            FixedRequestEnvironmentCollector(),
+            session_controls=(
+                RuntimeInstruction(
+                    "runtime.invalid",
+                    "instruction",
+                    "request",
+                    "invalid",
+                    "test",
+                ),
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_execution_request_and_round_use_fixed_order() -> None:
     runtime = make_runtime()
