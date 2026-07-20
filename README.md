@@ -175,7 +175,7 @@ Path.home() / ".mewcode-agent" / "context-artifacts" / <session_id> / "tool-resu
 
 只有本次会话已登记的精确绝对路径可以通过 `read_context_artifact` 分页读取。应用正常退出时删除当前 session 目录；下次启动清理超过 `24` 小时且名称严格匹配会话 ID 格式的崩溃遗留目录。
 
-在没有活动 Agent run 时输入精确命令 `/compact`，可手动压缩历史并默认保留最新 `4` 个原子历史单元。大小写不同、携带参数或包含其他非空文本的输入按普通用户消息处理。自动摘要连续失败 `3` 次后熔断；手动压缩成功会恢复自动压缩。
+在没有活动 Agent run 时输入 `/compact` 或 `/compress`，可手动压缩历史并默认保留最新 `4` 个原子历史单元。命令名大小写不敏感，但命令不接受参数。自动摘要连续失败 `3` 次后熔断；手动压缩成功会恢复自动压缩。
 
 context artifact 是工具结果外置产生的临时文件。它的退出和陈旧目录清理不会删除下面的会话存档。
 
@@ -198,7 +198,7 @@ Path.home() / ".mewcode-agent" / "sessions" / <session_id> / "messages.jsonl"
 - `/session path <session_id>`：显示会话目录的精确绝对路径。
 - `/session delete <session_id>`：确认后删除指定的非活动会话。
 
-`session_id` 是 32 位小写十六进制字符串。精确命令不会进入普通历史；大小写不同、参数缺失或含多余参数的文本按普通用户消息处理。距上次活跃达到 `7` 天的恢复会话会收到非授权型时间跨度提醒；恢复结果达到 Prompt 预算时先尝试一次现有上下文压缩。
+`session_id` 是 32 位小写十六进制字符串，不会转换大写或修复格式。命令名大小写不敏感，子命令和参数保持区分大小写。命令不会进入普通历史；参数无效时只在本地显示用法。距上次活跃达到 `7` 天的恢复会话会收到非授权型时间跨度提醒；恢复结果达到 Prompt 预算时先尝试一次现有上下文压缩。
 
 ## 分层自动笔记
 
@@ -213,14 +213,38 @@ Path.cwd() / ".mewcode" / "notes.md"
 
 每 `5` 个成功完成的用户请求触发一次异步更新；退出时若存在尚未处理的新对话，再等待一次更新，最长 `120` 秒。更新使用当前 Provider，明确设置 `tools=None`，并严格校验固定 JSON 结构；语义合并和去重由 LLM 完成，代码不实现相似度算法。
 
-可用命令：
+可用命令（`notes` 是规范命令 `memory` 的兼容别名）：
 
-- `/notes`：显示四类当前笔记。
-- `/notes paths`：显示两份笔记文件的精确绝对路径。
-- `/notes clear user`：确认后清空用户级笔记。
-- `/notes clear project`：确认后清空项目级笔记。
+- `/memory`、`/notes`：显示四类当前笔记。
+- `/memory paths`、`/notes paths`：显示两份笔记文件的精确绝对路径。
+- `/memory clear user`、`/notes clear user`：确认后清空用户级笔记。
+- `/memory clear project`、`/notes clear project`：确认后清空项目级笔记。
 
 笔记命令不进入普通历史，清空必须经过确认。应用不会自动清空笔记。
+
+## 斜杠命令
+
+所有 `/` 前缀输入先进入集中式命令注册中心。命令名是第一个 ASCII 空格前的部分，按小写解析，因此 `/HELP`、`/Help` 和 `/help` 等价；参数原文不转换大小写、路径或标识符。未知命令不会发送给模型，统一引导使用 `/help`。
+
+| 命令 | 别名 | 行为 |
+| --- | --- | --- |
+| `/help [command]` | `/h`、`/?` | 显示命令总览或单条命令的元数据和用法 |
+| `/status` | `/stat` | 显示模型、模式、会话、Prompt Token 估值、笔记和权限状态 |
+| `/mode [plan\|execute]` | 无 | 查看或切换后续普通消息的默认模式 |
+| `/review [scope]` | `/code-review` | 把固定只读代码审查提示送入 Agent |
+| `/compact` | `/compress` | 手动执行上下文压缩 |
+| `/clear` | `/new` | 保留旧会话存档并切换到新的 lazy 空会话 |
+| `/sessions` | 无 | 列出当前项目的已保存会话 |
+| `/resume <session_id>` | 无 | 恢复指定会话 |
+| `/session <path\|delete> <session_id>` | 无 | 定位或确认删除非活动会话 |
+| `/memory [...]` | `/notes` | 查看、定位或确认清空分层笔记 |
+| `/permissions [...]` | `/perms` | 查看权限状态或设置当前进程模式覆盖 |
+
+`/permissions strict`、`/permissions default` 和 `/permissions permissive` 只覆盖当前应用进程中未命中规则的默认处理，`/permissions reset` 恢复启动配置。它不会写入安全 YAML 或永久审批文件，也不能绕过内置危险操作拒绝、路径沙箱或显式安全规则。
+
+`/review` 固定以 execute 方式运行，让 Agent 可以直接给出审查结果，但不会改变状态栏中的默认模式；其工具调用仍经过完整安全策略。
+
+输入框中只有一个公开命令前缀匹配时，Tab 会直接补全；多个匹配时弹出可用 Up、Down、Enter 和 Escape 操作的候选列表。隐藏命令不参与帮助、状态栏提示或补全。状态栏持续显示 `mode=plan|execute` 和 `/help /status /compact`。
 
 ## 启动
 
@@ -258,6 +282,8 @@ uv run python -m compileall -q src tests integration_tests
 - 支持 JSONL 持久会话、meta 列表、安全恢复和显式删除；不自动清理会话存档。
 - 支持项目级优先的两层 Markdown 指令和受限 `@include`。
 - 支持用户级与项目级分流的自动笔记、查看、定位和确认清空。
+- 支持集中式斜杠命令注册、别名冲突检查、大小写不敏感分发、帮助和 Tab 补全。
+- 支持本地状态、进程内权限模式覆盖和预设代码审查工作流。
 - 内置 `read_file`、`write_file`、`edit_file`、`run_command`、`find_files`、`search_code` 和会话限定的 `read_context_artifact`。
 - 支持通过 stdio 或 Streamable HTTP 发现并复用 MCP 远端工具；当前只实现 MCP Tools，不实现 Resources、Prompts、OAuth 或 Tasks。
 - 每次用户请求最多执行 `15` 个模型轮；工具结果会立即写入对话历史并回灌模型，直到模型返回最终文本。
@@ -265,6 +291,6 @@ uv run python -m compileall -q src tests integration_tests
 - 第 `15` 个模型轮不提供工具定义，并要求模型根据已有结果生成最终答复。
 - 文件工具支持项目内的相对路径和绝对路径；规范化结果超出启动工作目录时拒绝执行。
 - 工具失败以结构化结果写入历史，不会导致应用退出。
-- 支持精确 `/compact` 手动命令和自动两级上下文压缩。
+- 支持 `/compact`、`/compress` 手动命令和自动两级上下文压缩。
 - 上下文 artifact 只在当前进程会话内使用并按临时文件策略清理；会话 JSONL 和笔记不受该清理影响。
 - 不实现向量检索、会话自动清理或本地相似度笔记去重。

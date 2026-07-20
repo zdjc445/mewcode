@@ -58,6 +58,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
     run_calls: list[bool] = []
     agent_loop_calls: list[dict[str, object]] = []
+    command_names: list[str] = []
 
     class FakeAgentLoop:
         def __init__(
@@ -81,14 +82,31 @@ def test_cli_builds_and_runs_app_with_valid_config(
                 }
             )
 
-    async def run_app(_self: object) -> None:
+    async def run_app(app: object) -> None:
         run_calls.append(True)
+        command_names.extend(
+            spec.name
+            for spec in app.command_registry.public_specs()  # type: ignore[attr-defined]
+        )
 
     monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop, raising=False)
     monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
 
     assert cli.main() == 0
     assert run_calls == [True]
+    assert command_names == [
+        "help",
+        "status",
+        "mode",
+        "review",
+        "compact",
+        "clear",
+        "sessions",
+        "resume",
+        "session",
+        "memory",
+        "permissions",
+    ]
     assert len(agent_loop_calls) == 1
     registry = agent_loop_calls[0]["registry"]
     assert isinstance(registry, ToolRegistry)
