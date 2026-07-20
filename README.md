@@ -111,6 +111,57 @@ rules:
 
 内置文件工具只能访问应用启动工作目录以内的规范化路径，并拒绝 `..`、绝对路径越界和符号链接越界。`run_command` 的 `cwd` 同样必须在工作目录内，并会拒绝已知破坏性命令和远程下载后直接执行的命令。`run_command` 仍然使用 PowerShell 或 `/bin/sh` 执行原始命令字符串，本项目当前没有提供操作系统级进程沙箱，因此危险命令检查不能等同于完整的文件系统、网络或进程隔离。
 
+## Hook 自动化配置
+
+声明式 Hook 在应用启动时从两层严格 YAML 加载：
+
+1. 项目级：`Path.cwd() / ".mewcode" / "hooks.yaml"`
+2. 用户级：`Path.home() / ".mewcode-agent" / "hooks.yaml"`
+
+项目规则先执行，并完整覆盖精确同 `id` 的用户规则。文件不存在表示该层没有 Hook；重复键、未知字段、无效 matcher 或动作组合会定位到精确规则字段并阻止启动。修改配置后需要重启应用。
+
+```yaml
+version: 1
+rules:
+  - id: audit_writes
+    event: tool.before_execute
+    once: false
+    async: true
+    timeout_seconds: 10
+    match:
+      tool.name:
+        kind: exact
+        pattern: write_file
+      file.path:
+        kind: not
+        pattern:
+          kind: glob
+          pattern: ".git/**"
+    action:
+      type: http
+      method: POST
+      url: "https://example.test/hooks"
+      headers:
+        Content-Type: application/json
+      body: '{"event":"${event.name}","path":"${file.path}"}'
+    intercept: null
+```
+
+事件名固定覆盖 `system.*`、`context.*`、`session.*`、`round.*`、`message.*` 和 `tool.*` 生命周期，完整清单与字段见 [`docs/ch10/spec.md`](docs/ch10/spec.md)。条件使用 `{kind, pattern}`，支持类型敏感的 `exact`、大小写敏感的 `glob`、完整值 `regex` 和最大八层递归 `not`；同一规则的所有字段必须同时命中。字段名和工具参数键都按原文精确匹配，不转换大小写或猜测别名。`${...}` 只读取该事件明确提供的上下文字段，未知字段使该次动作失败，不会替换为空字符串。
+
+动作支持：
+
+- `shell`：在项目根目录使用 PowerShell 或 `/bin/sh` 执行明确 command；stdout/stderr 不进入模型。
+- `prompt`：作为 request 级 Prompt control 注入，不写入普通历史或会话 JSONL；无活动 request 时排队到下一次请求。
+- `http`：使用共享异步客户端发送绝对 HTTP(S) URL，不跟随重定向，响应正文不进入模型。
+- `subagent`：当前返回脱敏的 `hook_subagent_unavailable` 诊断，Chapter 11 接入统一子工作者后启用真实执行。
+
+`async: true` 的 shell、HTTP 或 subagent 动作不会阻塞 Agent，退出时会在各自超时内等待收尾。`once: true` 在当前应用进程内最多调度一次，失败或超时不自动重试。同步 `tool.before_execute` 规则可以使用 `intercept: {deny: true, reason: ...}` 返回 `tool_blocked_by_hook`；它只会进一步拒绝已经通过安全策略与审批的调用，不能授予权限或修改工具参数/结果。
+
+Hook 动作失败、超时或模板错误只输出不含 command、Prompt、HTTP 数据、工具参数和环境值的本地诊断，不改变 Agent 原始结果。Hook 配置不会自动创建、修改或清理。
+
+项目级 Hook 能直接执行 shell 并向网络发送规则作者选择的模板数据。只应在明确受信任的工作区中放置或启用 `.mewcode/hooks.yaml`；工具安全规则不会对 Hook 自身授予操作再次弹出审批。
+
 ## MCP 工具配置
 
 应用支持 MCP `2025-11-25` 的 Tools 能力，以及本地子进程 `stdio` 和远程 `streamable_http` 两种传输。MCP 配置只从用户全局路径加载：
@@ -342,6 +393,7 @@ uv run python -m compileall -q src tests integration_tests
 - 支持集中式斜杠命令注册、别名冲突检查、大小写不敏感分发、帮助和 Tab 补全。
 - 支持项目、用户、内置三层 Skill，按需加载 SOP、最小工具白名单、shared/isolated 执行和动态命令。
 - 支持目录 Skill 的严格 JSON Schema 与无 shell Python 子进程工具协议。
+- 支持两层声明式 Hook、生命周期事件、同步/异步动作、Prompt 注入、HTTP、shell 和工具拒绝拦截。
 - 支持本地状态和进程内权限模式覆盖。
 - 内置 `read_file`、`write_file`、`edit_file`、`run_command`、`find_files`、`search_code` 和会话限定的 `read_context_artifact`。
 - 支持通过 stdio 或 Streamable HTTP 发现并复用 MCP 远端工具；当前只实现 MCP Tools，不实现 Resources、Prompts、OAuth 或 Tasks。

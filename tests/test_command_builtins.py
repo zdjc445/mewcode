@@ -144,6 +144,7 @@ class BuiltinFixture:
     policy: SecurityPolicyEngine
     paths: PermissionCommandPaths
     activations: list[str]
+    session_switches: list[tuple[str, bool]]
 
 
 def make_fixture(
@@ -173,10 +174,14 @@ def make_fixture(
     )
     loop = FakeAgentLoop()
     activations: list[str] = []
+    session_switches: list[tuple[str, bool]] = []
 
     def activate_new() -> None:
         activations.append("new")
         notes.reload_for_session()
+
+    async def session_switched(previous: str, restored: bool) -> None:
+        session_switches.append((previous, restored))
 
     services = BuiltinCommandServices(
         loop,  # type: ignore[arg-type]
@@ -189,6 +194,7 @@ def make_fixture(
         paths,
         lambda recovery: activations.append(recovery.meta.session_id),
         activate_new,
+        session_switched,
     )
     registry = build_builtin_command_registry(services)
     ui = FakeUI()
@@ -203,6 +209,7 @@ def make_fixture(
         policy,
         paths,
         activations,
+        session_switches,
     )
 
 
@@ -339,7 +346,22 @@ async def test_clear_preserves_old_session_bytes_and_starts_lazy_new_session(
     assert (old_directory / "meta.json").read_bytes() == meta_before
     assert fixture.notes.flush_calls == 1
     assert fixture.activations == ["new"]
+    assert fixture.session_switches == [(ACTIVE_ID, False)]
     assert fixture.ui.clear_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_clear_does_not_emit_session_switch(tmp_path: Path) -> None:
+    fixture = make_fixture(
+        tmp_path,
+        id_factory=lambda: ACTIVE_ID,
+    )
+
+    result = await fixture.controller.dispatch("/clear")
+
+    assert result.success is False
+    assert fixture.sessions.active_session_id == ACTIVE_ID
+    assert fixture.session_switches == []
 
 
 @pytest.mark.asyncio

@@ -27,10 +27,21 @@ class RecordingPromptSink:
     ) -> None:
         self.items.append((content, event_sequence, rule_id))
 
+    async def flush(self) -> tuple[str, ...]:
+        return ()
+
     def discard_pending(self) -> int:
         value = self.pending
         self.pending = 0
         return value
+
+    def reset_session(
+        self,
+        *,
+        preserve_rule_ids: frozenset[str],
+    ) -> int:
+        del preserve_rule_ids
+        return 0
 
 
 async def test_prompt_and_http_actions_use_rendered_context(

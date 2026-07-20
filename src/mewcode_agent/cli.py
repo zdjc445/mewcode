@@ -24,6 +24,16 @@ from mewcode_agent.commands import (
 )
 from mewcode_agent.config import ConfigError, load_config
 from mewcode_agent.history import ConversationHistory
+from mewcode_agent.hooks import (
+    HookActionRunner,
+    HookConfigError,
+    HookDiagnostic,
+    HookEngine,
+    HookLifecycle,
+    HookToolExecutionInterceptor,
+    PromptHookBridge,
+    load_hook_configuration,
+)
 from mewcode_agent.instructions import (
     InstructionConfigError,
     load_instruction_documents,
@@ -112,6 +122,26 @@ def _print_skill_diagnostic(diagnostic: SkillDiagnostic) -> None:
     )
 
 
+def _print_hook_diagnostic(diagnostic: HookDiagnostic) -> None:
+    source = diagnostic.source if diagnostic.source is not None else "runtime"
+    rule_id = diagnostic.rule_id if diagnostic.rule_id is not None else "none"
+    action = (
+        diagnostic.action_type
+        if diagnostic.action_type is not None
+        else "none"
+    )
+    print(
+        "Hook 警告："
+        f"source={source} "
+        f"rule={rule_id} "
+        f"event={diagnostic.event} "
+        f"action={action} "
+        f"code={diagnostic.code} "
+        f"{diagnostic.message}",
+        file=sys.stderr,
+    )
+
+
 async def run_application() -> int:
     """Build and run one application session on the current event loop."""
 
@@ -119,6 +149,10 @@ async def run_application() -> int:
     artifact_store: ContextArtifactStore | None = None
     session_manager: SessionManager | None = None
     notes_manager: NotesManager | None = None
+    hook_action_runner: HookActionRunner | None = None
+    hook_engine: HookEngine | None = None
+    hook_lifecycle: HookLifecycle | None = None
+    hook_lifecycle_started = False
     try:
         session_environment = collect_session_environment()
         working_directory = Path(
@@ -136,10 +170,12 @@ async def run_application() -> int:
             working_directory / ".mewcode" / "prompts.yaml"
         )
         user_security_path = user_config_directory / "security.yaml"
+        user_hook_path = user_config_directory / "hooks.yaml"
         mcp_config_path = user_config_directory / "mcp_servers.yaml"
         project_security_path = (
             working_directory / ".mewcode" / "security.yaml"
         )
+        project_hook_path = working_directory / ".mewcode" / "hooks.yaml"
         permanent_approval_path = (
             user_config_directory / "security-approvals.yaml"
         )
@@ -177,6 +213,10 @@ async def run_application() -> int:
             user_path=user_security_path,
             project_path=project_security_path,
             permanent_rules=permanent_rules,
+        )
+        hook_configuration = load_hook_configuration(
+            user_path=user_hook_path,
+            project_path=project_hook_path,
         )
         provider_config = config.active_provider
         history = ConversationHistory()
@@ -248,10 +288,6 @@ async def run_application() -> int:
             security_boundary,
             approval_store=approval_store,
         )
-        scheduler = ToolScheduler(
-            registry,
-            policy_engine=security_policy,
-        )
         loop_config = AgentLoopConfig()
         context_summarizer = ContextSummarizer(
             provider,
@@ -269,6 +305,26 @@ async def run_application() -> int:
             max_tokens=provider_config.max_tokens,
             config=compaction_config,
         )
+        prompt_hook_bridge = PromptHookBridge(
+            prompt_runtime,
+            history_length_provider=lambda: len(history.snapshot()),
+        )
+        hook_action_runner = HookActionRunner(
+            project_root=working_directory,
+            prompt_sink=prompt_hook_bridge,
+        )
+        hook_engine = HookEngine(
+            hook_configuration,
+            hook_action_runner,
+            project_root=working_directory,
+            session_id_provider=lambda: session_manager.active_session_id,
+            diagnostic_handler=_print_hook_diagnostic,
+        )
+        scheduler = ToolScheduler(
+            registry,
+            interceptor=HookToolExecutionInterceptor(hook_engine),
+            policy_engine=security_policy,
+        )
     except (
         ConfigError,
         SecurityConfigError,
@@ -282,6 +338,7 @@ async def run_application() -> int:
         SessionError,
         NotesError,
         SkillConfigError,
+        HookConfigError,
     ) as exc:
         try:
             if session_manager is not None:
@@ -296,6 +353,8 @@ async def run_application() -> int:
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
     try:
+        assert hook_engine is not None
+        assert hook_action_runner is not None
         agent_loop = AgentLoop(
             provider,
             registry,
@@ -304,6 +363,7 @@ async def run_application() -> int:
             scheduler=scheduler,
             context_window_manager=context_window_manager,
             visible_tool_names=skill_runtime.visible_tool_names,
+            hook_engine=hook_engine,
         )
         isolated_executor = IsolatedSkillExecutor(
             provider=provider,
@@ -321,6 +381,10 @@ async def run_application() -> int:
         skill_runtime.set_isolated_runner(isolated_executor.run)
         assert session_manager is not None
         assert notes_manager is not None
+        hook_lifecycle = HookLifecycle(
+            hook_engine,
+            active_session_id=lambda: session_manager.active_session_id,
+        )
 
         def load_current_session_controls() -> tuple[
             RuntimeInstruction, ...
@@ -375,6 +439,10 @@ async def run_application() -> int:
                 ),
                 activate_session,
                 activate_new_session,
+                lambda previous, restored: hook_lifecycle.session_switched(
+                    previous,
+                    restored=restored,
+                ),
             ),
             extra_specs=(skill_command_manager.management_spec(),),
         )
@@ -391,6 +459,8 @@ async def run_application() -> int:
             command_registry=command_registry,
             notes_manager=notes_manager,
         )
+        await hook_lifecycle.start()
+        hook_lifecycle_started = True
         await app.run_async()
         return 0
     finally:
@@ -398,16 +468,23 @@ async def run_application() -> int:
         assert artifact_store is not None
         assert session_manager is not None
         assert notes_manager is not None
+        assert hook_action_runner is not None
+        assert hook_engine is not None
         try:
             await notes_manager.flush_on_exit()
         finally:
             try:
-                session_manager.close()
+                if hook_lifecycle_started and hook_lifecycle is not None:
+                    await hook_lifecycle.end_active_session()
+                await hook_engine.close()
             finally:
                 try:
-                    await mcp_manager.close()
+                    session_manager.close()
                 finally:
-                    await artifact_store.close()
+                    try:
+                        await mcp_manager.close()
+                    finally:
+                        await artifact_store.close()
 
 
 def main() -> int:

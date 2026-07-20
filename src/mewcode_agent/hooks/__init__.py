@@ -6,6 +6,11 @@ from mewcode_agent.hooks.actions import (
     HookPromptSink,
 )
 from mewcode_agent.hooks.engine import HookEngine
+from mewcode_agent.hooks.integration import (
+    HookLifecycle,
+    HookToolExecutionInterceptor,
+    PromptHookBridge,
+)
 from mewcode_agent.hooks.loader import load_hook_configuration
 from mewcode_agent.hooks.matching import matcher_matches, rule_matches
 from mewcode_agent.hooks.models import (
@@ -47,13 +52,16 @@ __all__ = [
     "HookEngine",
     "HookEventName",
     "HookInterception",
+    "HookLifecycle",
     "HookPromptSink",
     "HookRule",
     "HookSource",
     "HookTemplateError",
+    "HookToolExecutionInterceptor",
     "HookValueMatcher",
     "HttpHookAction",
     "PromptHookAction",
+    "PromptHookBridge",
     "ShellHookAction",
     "SubagentHookAction",
     "load_hook_configuration",

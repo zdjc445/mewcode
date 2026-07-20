@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -86,6 +86,7 @@ class BuiltinCommandServices:
     permission_paths: PermissionCommandPaths
     activate_restored_session: Callable[[SessionRecovery], None]
     activate_new_session: Callable[[], None]
+    session_switched: Callable[[str, bool], Awaitable[None]] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.provider_id, str) or not self.provider_id:
@@ -198,11 +199,19 @@ class _BuiltinHandlers:
         _require_no_arguments(invocation)
         try:
             await self._services.notes_manager.flush_before_session_switch()
+            previous_session_id = (
+                self._services.session_manager.active_session_id
+            )
             session_id = self._services.session_manager.start_new(
                 activate=self._services.activate_new_session
             )
         except (SessionError, NotesError) as exc:
             raise CommandDomainError(exc.code, exc.message) from exc
+        if self._services.session_switched is not None:
+            await self._services.session_switched(
+                previous_session_id,
+                False,
+            )
         ui.clear_transcript()
         ui.refresh_status(f"新会话：{session_id}")
 
@@ -256,12 +265,20 @@ class _BuiltinHandlers:
         session_id = _require_session_id(invocation.arguments)
         try:
             await self._services.notes_manager.flush_before_session_switch()
+            previous_session_id = (
+                self._services.session_manager.active_session_id
+            )
             recovery = await self._services.session_manager.resume_async(
                 session_id,
                 activate=self._services.activate_restored_session,
             )
         except (SessionError, NotesError) as exc:
             raise CommandDomainError(exc.code, exc.message) from exc
+        if self._services.session_switched is not None:
+            await self._services.session_switched(
+                previous_session_id,
+                True,
+            )
         ui.clear_transcript()
         try:
             preparation = (

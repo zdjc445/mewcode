@@ -29,6 +29,7 @@ from mewcode_agent.hooks.templates import HookTemplateError, render_template
 
 HookDiagnosticHandler = Callable[[HookDiagnostic], None]
 SessionIdProvider = Callable[[], str | None]
+_DEFAULT_SESSION = object()
 
 
 class HookEngine:
@@ -69,10 +70,16 @@ class HookEngine:
         self,
         event: HookEventName,
         values: Mapping[str, Any] | None = None,
+        *,
+        session_id: str | None | object = _DEFAULT_SESSION,
     ) -> HookDispatchResult:
         if self._closing or self._closed:
             return HookDispatchResult()
-        return await self._dispatch(event, values or {})
+        return await self._dispatch(
+            event,
+            values or {},
+            session_id=session_id,
+        )
 
     async def _dispatch(
         self,
@@ -80,6 +87,7 @@ class HookEngine:
         values: Mapping[str, Any],
         *,
         allow_closing: bool = False,
+        session_id: str | None | object = _DEFAULT_SESSION,
     ) -> HookDispatchResult:
         if event not in HOOK_EVENT_NAMES:
             raise ValueError("Hook event 无效")
@@ -88,7 +96,12 @@ class HookEngine:
         self._event_sequence += 1
         sequence = self._event_sequence
         try:
-            context = self._build_context(event, sequence, values)
+            context = self._build_context(
+                event,
+                sequence,
+                values,
+                session_id=session_id,
+            )
         except (TypeError, ValueError, RuntimeError):
             self._diagnose(
                 HookDiagnostic(
@@ -185,6 +198,8 @@ class HookEngine:
         event: HookEventName,
         sequence: int,
         values: Mapping[str, Any],
+        *,
+        session_id: str | None | object,
     ) -> dict[str, Any]:
         if not isinstance(values, Mapping):
             raise TypeError("values 必须是 Mapping")
@@ -193,12 +208,20 @@ class HookEngine:
             "event.sequence": sequence,
             "project.root": str(self._project_root),
         }
-        if self._session_id_provider is not None:
-            session_id = self._session_id_provider()
-            if session_id is not None:
-                if not isinstance(session_id, str) or not session_id:
+        resolved_session_id = session_id
+        if (
+            resolved_session_id is _DEFAULT_SESSION
+            and self._session_id_provider is not None
+        ):
+            resolved_session_id = self._session_id_provider()
+        if resolved_session_id is not _DEFAULT_SESSION:
+            if resolved_session_id is not None:
+                if (
+                    not isinstance(resolved_session_id, str)
+                    or not resolved_session_id
+                ):
                     raise ValueError("session id 无效")
-                context["session.id"] = session_id
+                context["session.id"] = resolved_session_id
         for path, value in values.items():
             if not isinstance(path, str) or not validate_context_path(path):
                 raise ValueError("Hook context path 无效")
@@ -293,6 +316,64 @@ class HookEngine:
             self._closed = True
             self._close_result = HookCloseResult(waited, pending)
             return self._close_result
+
+    async def flush_pending_prompts(self) -> None:
+        if self._closing or self._closed:
+            return
+        try:
+            failed_rule_ids = (
+                await self._action_runner.flush_pending_prompts()
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._diagnose(
+                HookDiagnostic(
+                    None,
+                    None,
+                    "message.before_send",
+                    "prompt",
+                    "hook_prompt_failed",
+                    "Hook pending Prompt 注入失败",
+                )
+            )
+            return
+        if not failed_rule_ids:
+            return
+        rules = {
+            rule.rule_id: rule
+            for event_rules in self._rules_by_event.values()
+            for rule in event_rules
+        }
+        for rule_id in failed_rule_ids:
+            rule = rules.get(rule_id)
+            if rule is None:
+                self._diagnose(
+                    HookDiagnostic(
+                        None,
+                        rule_id,
+                        "message.before_send",
+                        "prompt",
+                        "hook_prompt_failed",
+                        "Hook pending Prompt 注入失败",
+                    )
+                )
+            else:
+                self._rule_diagnostic(
+                    rule,
+                    "hook_prompt_failed",
+                    "Hook pending Prompt 注入失败",
+                )
+
+    def reset_session_prompts(self) -> int:
+        startup_prompt_rules = frozenset(
+            rule.rule_id
+            for rule in self._rules_by_event["system.startup"]
+            if action_type(rule.action) == "prompt"
+        )
+        return self._action_runner.reset_prompt_session(
+            preserve_rule_ids=startup_prompt_rules
+        )
 
     @property
     def background_task_count(self) -> int:

@@ -409,6 +409,32 @@ async def test_manual_compaction_bypasses_and_resets_fuse() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_compaction_awaits_summary_start_callback() -> None:
+    history = populated_history()
+    summarizer = StubSummarizer()
+    manager = make_manager(summarizer, StubToolCompactor())
+    calls: list[tuple[int, int, int]] = []
+
+    async def on_start(
+        generation: int,
+        covered_messages: int,
+        estimate_before: int,
+    ) -> None:
+        assert summarizer.calls == []
+        calls.append((generation, covered_messages, estimate_before))
+
+    result = await manager.compact_now(
+        history,
+        compose_frame=frame_factory(history),
+        tools=None,
+        on_summary_start=on_start,
+    )
+
+    assert result.changed is True
+    assert calls == [(1, 4, result.estimate_before)]
+
+
+@pytest.mark.asyncio
 async def test_manual_compaction_is_noop_without_enough_history() -> None:
     history = ConversationHistory()
     history.add_user("任务")

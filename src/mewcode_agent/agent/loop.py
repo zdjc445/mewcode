@@ -41,6 +41,7 @@ from mewcode_agent.compaction import (
     RestoredHistoryPreparation,
 )
 from mewcode_agent.history import ConversationHistory
+from mewcode_agent.hooks import HookEngine, HookEventName
 from mewcode_agent.models import ThinkingBlock, ToolCall
 from mewcode_agent.prompting.builtins import PLAN_APPROVED_TEXT
 from mewcode_agent.prompting.composer import PromptComposer
@@ -119,6 +120,7 @@ class AgentLoop:
         usage_collector: UsageCollector | None = None,
         context_window_manager: ContextWindowManager | None,
         visible_tool_names: Callable[[], frozenset[str] | None] | None = None,
+        hook_engine: HookEngine | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -129,6 +131,27 @@ class AgentLoop:
         self._usage_collector = usage_collector
         self._context_window_manager = context_window_manager
         self._visible_tool_names_provider = visible_tool_names
+        self._hook_engine = hook_engine
+
+    async def _dispatch_hook(
+        self,
+        event: HookEventName,
+        values: dict[str, Any] | None = None,
+    ) -> None:
+        if self._hook_engine is None:
+            return
+        await self._hook_engine.dispatch(event, values)
+
+    async def _run_error_event(
+        self,
+        code: str,
+        message: str,
+    ) -> RunErrorEvent:
+        await self._dispatch_hook(
+            "system.error",
+            {"error.code": code, "error.message": message},
+        )
+        return RunErrorEvent(code, message)
 
     def _visible_tool_names(self) -> frozenset[str] | None:
         if self._visible_tool_names_provider is None:
@@ -171,15 +194,68 @@ class AgentLoop:
                         )
                     )
 
-            return await manager.compact_now(
-                history,
-                compose_frame=lambda: self._prompt_composer.compose(
-                    history.snapshot(),
-                    self._prompt_runtime.timeline(),
-                ),
-                tools=tools,
-                on_summary_usage=record_usage,
-            )
+            summary_attempt: tuple[int, int, int] | None = None
+
+            async def on_summary_start(
+                generation: int,
+                covered_messages: int,
+                estimate_before: int,
+            ) -> None:
+                nonlocal summary_attempt
+                summary_attempt = (
+                    generation,
+                    covered_messages,
+                    estimate_before,
+                )
+                await self._dispatch_hook(
+                    "context.before_compaction",
+                    {
+                        "compaction.generation": generation,
+                        "compaction.covered_messages": covered_messages,
+                        "compaction.estimate_before": estimate_before,
+                    },
+                )
+
+            try:
+                result = await manager.compact_now(
+                    history,
+                    compose_frame=lambda: self._prompt_composer.compose(
+                        history.snapshot(),
+                        self._prompt_runtime.timeline(),
+                    ),
+                    tools=tools,
+                    on_summary_start=on_summary_start,
+                    on_summary_usage=record_usage,
+                )
+            except ContextCompactionError as exc:
+                if summary_attempt is not None:
+                    generation, covered, estimate_before = summary_attempt
+                    await self._dispatch_hook(
+                        "context.after_compaction",
+                        {
+                            "compaction.generation": generation,
+                            "compaction.covered_messages": covered,
+                            "compaction.estimate_before": estimate_before,
+                            "compaction.estimate_after": estimate_before,
+                            "compaction.success": False,
+                            "compaction.error_code": exc.code,
+                        },
+                    )
+                raise
+            if summary_attempt is not None:
+                await self._dispatch_hook(
+                    "context.after_compaction",
+                    {
+                        "compaction.generation": result.generation,
+                        "compaction.covered_messages": (
+                            result.covered_history_end
+                        ),
+                        "compaction.estimate_before": result.estimate_before,
+                        "compaction.estimate_after": result.estimate_after,
+                        "compaction.success": result.changed,
+                    },
+                )
+            return result
         except ContextCompactionError:
             raise
         except (ValueError, RuntimeError) as exc:
@@ -283,13 +359,21 @@ class AgentLoop:
                 )
             except (ValueError, RuntimeError):
                 state = "failed"
-                yield RunErrorEvent(
-                    "prompt_error",
-                    "无法生成本轮模型请求",
+                yield await self._run_error_event(
+                    "prompt_error", "无法生成本轮模型请求"
                 )
                 return
             request_started = True
+            if self._hook_engine is not None:
+                await self._hook_engine.flush_pending_prompts()
             history.add_user(user_message)
+            await self._dispatch_hook(
+                "message.before_send",
+                {
+                    "message.content": user_message,
+                    "message.kind": "user",
+                },
+            )
             yield UserMessageEvent(user_message)
 
             while round_number < self._config.max_rounds:
@@ -310,6 +394,7 @@ class AgentLoop:
 
                 is_final_round = round_number == self._config.max_rounds
                 round_started = False
+                round_outcome = "failed"
                 try:
                     try:
                         self._prompt_runtime.begin_round(
@@ -319,6 +404,14 @@ class AgentLoop:
                             mode=mode,
                         )
                         round_started = True
+                        await self._dispatch_hook(
+                            "round.started",
+                            {
+                                "round.number": round_number,
+                                "round.max_rounds": self._config.max_rounds,
+                                "round.mode": mode,
+                            },
+                        )
                         self._prompt_runtime.seal_round()
                         visible_names = self._visible_tool_names()
                         api_tools = (
@@ -367,17 +460,17 @@ class AgentLoop:
                             assert provider_request is not None
                     except AgentRunCancelled:
                         state = "cancelled"
+                        round_outcome = "cancelled"
                         yield RunCancelledEvent("user_cancelled")
                         return
                     except ContextCompactionError as exc:
                         state = "failed"
-                        yield RunErrorEvent(exc.code, exc.message)
+                        yield await self._run_error_event(exc.code, exc.message)
                         return
                     except (ValueError, RuntimeError):
                         state = "failed"
-                        yield RunErrorEvent(
-                            "prompt_error",
-                            "无法生成本轮模型请求",
+                        yield await self._run_error_event(
+                            "prompt_error", "无法生成本轮模型请求"
                         )
                         return
 
@@ -394,11 +487,12 @@ class AgentLoop:
                             yield event
                     except AgentRunCancelled:
                         state = "cancelled"
+                        round_outcome = "cancelled"
                         yield RunCancelledEvent("user_cancelled")
                         return
                     except TimeoutError:
                         state = "failed"
-                        yield RunErrorEvent(
+                        yield await self._run_error_event(
                             "llm_timeout",
                             (
                                 "模型单轮调用超过 "
@@ -408,17 +502,18 @@ class AgentLoop:
                         return
                     except ProviderError as exc:
                         state = "failed"
-                        yield RunErrorEvent("provider_error", str(exc))
+                        yield await self._run_error_event(
+                            "provider_error", str(exc)
+                        )
                         return
                     except _AgentLoopFailure as exc:
                         state = "failed"
-                        yield RunErrorEvent(exc.code, exc.message)
+                        yield await self._run_error_event(exc.code, exc.message)
                         return
                     except Exception:
                         state = "failed"
-                        yield RunErrorEvent(
-                            "provider_error",
-                            "模型调用失败",
+                        yield await self._run_error_event(
+                            "provider_error", "模型调用失败"
                         )
                         return
 
@@ -444,7 +539,7 @@ class AgentLoop:
                     turn_end = round_data.turn_end
                     if turn_end is None:
                         state = "failed"
-                        yield RunErrorEvent(
+                        yield await self._run_error_event(
                             "invalid_provider_stream",
                             "Provider 流缺少结束事件",
                         )
@@ -453,7 +548,7 @@ class AgentLoop:
                     has_tool_calls = bool(round_data.tool_calls)
                     if is_final_round and has_tool_calls:
                         state = "failed"
-                        yield RunErrorEvent(
+                        yield await self._run_error_event(
                             "max_rounds_exceeded",
                             "最终模型轮仍返回了工具调用",
                         )
@@ -465,7 +560,7 @@ class AgentLoop:
                         and not round_data.thinking_blocks
                     ):
                         state = "failed"
-                        yield RunErrorEvent(
+                        yield await self._run_error_event(
                             "invalid_provider_stream",
                             "工具调用轮缺少完整 thinking 元数据",
                         )
@@ -473,7 +568,7 @@ class AgentLoop:
 
                     if turn_end.stop_reason == "max_tokens":
                         state = "failed"
-                        yield RunErrorEvent(
+                        yield await self._run_error_event(
                             "max_tokens_reached",
                             "模型达到 Token 上限，未能完成当前响应",
                         )
@@ -483,13 +578,22 @@ class AgentLoop:
                         turn_end.stop_reason == "tool_calls"
                     ):
                         state = "failed"
-                        yield RunErrorEvent(
+                        yield await self._run_error_event(
                             "invalid_provider_stream",
                             "Provider 停止原因与工具调用不一致",
                         )
                         return
 
                     if has_tool_calls:
+                        await self._dispatch_hook(
+                            "message.after_receive",
+                            {
+                                "message.content": "".join(
+                                    round_data.text_parts
+                                ),
+                                "message.kind": "assistant",
+                            },
+                        )
                         history.add_assistant_tool_calls(
                             "".join(round_data.text_parts),
                             tuple(round_data.tool_calls),
@@ -514,28 +618,39 @@ class AgentLoop:
                             yield event
                         if context.cancelled:
                             state = "cancelled"
+                            round_outcome = "cancelled"
                             yield RunCancelledEvent("user_cancelled")
                             return
+                        round_outcome = "continued"
                         continue
 
                     content = "".join(round_data.text_parts)
                     if not content.strip():
                         state = "failed"
                         if round_data.saw_thinking:
-                            yield RunErrorEvent(
+                            yield await self._run_error_event(
                                 "invalid_provider_stream",
                                 "Provider 只返回了 thinking，没有正文",
                             )
                         else:
-                            yield RunErrorEvent(
+                            yield await self._run_error_event(
                                 "empty_response",
                                 "模型没有返回正文、thinking 或工具调用",
                             )
                         return
 
+                    await self._dispatch_hook(
+                        "message.after_receive",
+                        {
+                            "message.content": content,
+                            "message.kind": "assistant",
+                        },
+                    )
+
                     if mode == "executing":
                         history.add_assistant(content)
                         state = "completed"
+                        round_outcome = "completed"
                         yield FinalResponseEvent(content, round_number)
                         return
 
@@ -554,11 +669,13 @@ class AgentLoop:
                         )
                     except AgentRunCancelled:
                         state = "cancelled"
+                        round_outcome = "cancelled"
                         yield RunCancelledEvent("user_cancelled")
                         return
 
                     if is_final_round:
                         state = "cancelled"
+                        round_outcome = "cancelled"
                         yield RunCancelledEvent("round_limit_after_plan")
                         return
                     if resolution.decision == "execute_current":
@@ -577,20 +694,43 @@ class AgentLoop:
                         )
                         current_request_authorized = True
                         state = "executing"
+                        round_outcome = "continued"
                     elif resolution.decision == "request_changes":
                         history.add_user(resolution.feedback)
+                        await self._dispatch_hook(
+                            "message.before_send",
+                            {
+                                "message.content": resolution.feedback,
+                                "message.kind": "user",
+                            },
+                        )
                         state = "planning"
+                        round_outcome = "continued"
                         yield UserMessageEvent(resolution.feedback)
                     else:
                         state = "cancelled"
+                        round_outcome = "cancelled"
                         yield RunCancelledEvent("plan_rejected")
                         return
                 finally:
                     if round_started:
-                        self._prompt_runtime.end_round()
+                        try:
+                            await self._dispatch_hook(
+                                "round.ended",
+                                {
+                                    "round.number": round_number,
+                                    "round.max_rounds": (
+                                        self._config.max_rounds
+                                    ),
+                                    "round.mode": mode,
+                                    "round.outcome": round_outcome,
+                                },
+                            )
+                        finally:
+                            self._prompt_runtime.end_round()
 
             state = "failed"
-            yield RunErrorEvent(
+            yield await self._run_error_event(
                 "max_rounds_exceeded",
                 "当前请求已达到模型轮数上限",
             )
@@ -610,21 +750,33 @@ class AgentLoop:
         started_events: asyncio.Queue[ContextCompactionStartedEvent] = (
             asyncio.Queue()
         )
-        summary_attempt: tuple[int, int] | None = None
+        summary_attempt: tuple[int, int, int] | None = None
 
-        def on_summary_start(
+        async def on_summary_start(
             generation: int,
             covered_messages: int,
             estimate_before: int,
         ) -> None:
             nonlocal summary_attempt
-            summary_attempt = (generation, covered_messages)
+            summary_attempt = (
+                generation,
+                covered_messages,
+                estimate_before,
+            )
             started_events.put_nowait(
                 ContextCompactionStartedEvent(
                     generation,
                     covered_messages,
                     estimate_before,
                 )
+            )
+            await self._dispatch_hook(
+                "context.before_compaction",
+                {
+                    "compaction.generation": generation,
+                    "compaction.covered_messages": covered_messages,
+                    "compaction.estimate_before": estimate_before,
+                },
             )
 
         def on_summary_usage(
@@ -673,6 +825,21 @@ class AgentLoop:
                         await started_task
                     with suppress(asyncio.CancelledError):
                         await preparation_task
+                    if summary_attempt is not None:
+                        generation, covered, estimate_before = summary_attempt
+                        await self._dispatch_hook(
+                            "context.after_compaction",
+                            {
+                                "compaction.generation": generation,
+                                "compaction.covered_messages": covered,
+                                "compaction.estimate_before": estimate_before,
+                                "compaction.estimate_after": estimate_before,
+                                "compaction.success": False,
+                                "compaction.error_code": (
+                                    "context_compaction_cancelled"
+                                ),
+                            },
+                        )
                     raise AgentRunCancelled
                 if started_task in done:
                     yield started_task.result()
@@ -683,10 +850,63 @@ class AgentLoop:
                 if preparation_task not in done:
                     continue
 
-                preparation = preparation_task.result()
+                try:
+                    preparation = preparation_task.result()
+                except ContextCompactionError as exc:
+                    if summary_attempt is not None:
+                        generation, covered, estimate_before = summary_attempt
+                        await self._dispatch_hook(
+                            "context.after_compaction",
+                            {
+                                "compaction.generation": generation,
+                                "compaction.covered_messages": covered,
+                                "compaction.estimate_before": estimate_before,
+                                "compaction.estimate_after": estimate_before,
+                                "compaction.success": False,
+                                "compaction.error_code": exc.code,
+                            },
+                        )
+                    raise
                 while not started_events.empty():
                     yield started_events.get_nowait()
                 checkpoint = manager.checkpoint
+                if summary_attempt is not None:
+                    generation, covered, _estimate_before = summary_attempt
+                    await self._dispatch_hook(
+                        "context.after_compaction",
+                        {
+                            "compaction.generation": (
+                                checkpoint.generation
+                                if preparation.checkpoint_changed
+                                and checkpoint is not None
+                                else generation
+                            ),
+                            "compaction.covered_messages": (
+                                checkpoint.covered_history_end
+                                if preparation.checkpoint_changed
+                                and checkpoint is not None
+                                else covered
+                            ),
+                            "compaction.estimate_before": (
+                                preparation.estimate_before
+                            ),
+                            "compaction.estimate_after": (
+                                preparation.estimate_after
+                            ),
+                            "compaction.success": (
+                                preparation.checkpoint_changed
+                            ),
+                            **(
+                                {
+                                    "compaction.error_code": (
+                                        preparation.warning_code
+                                    )
+                                }
+                                if preparation.warning_code is not None
+                                else {}
+                            ),
+                        },
+                    )
                 if preparation.checkpoint_changed:
                     assert checkpoint is not None
                     yield ContextCompactionCompletedEvent(

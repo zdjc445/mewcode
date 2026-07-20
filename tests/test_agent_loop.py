@@ -398,6 +398,7 @@ def make_loop(
     *,
     config: AgentLoopConfig | None = None,
     usage_collector: UsageCollector | None = None,
+    hook_engine: object | None = None,
 ) -> AgentLoop:
     runtime, composer = make_prompt_dependencies()
     return AgentLoop(
@@ -408,13 +409,31 @@ def make_loop(
         config=config,
         usage_collector=usage_collector,
         context_window_manager=None,
+        hook_engine=hook_engine,  # type: ignore[arg-type]
     )
+
+
+class RecordingHookEngine:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.flushes = 0
+
+    async def dispatch(
+        self,
+        event: str,
+        values: dict[str, Any] | None = None,
+    ) -> None:
+        self.events.append((event, dict(values or {})))
+
+    async def flush_pending_prompts(self) -> None:
+        self.flushes += 1
 
 
 def make_integrated_compaction_loop(
     provider: IntegratedCompactionProvider,
     *,
     usage_collector: UsageCollector | None = None,
+    hook_engine: object | None = None,
 ) -> tuple[AgentLoop, ContextWindowManager, FixedCompactionEstimator]:
     runtime, composer = make_prompt_dependencies()
     registry = make_registry()
@@ -436,6 +455,7 @@ def make_integrated_compaction_loop(
             prompt_composer=composer,
             usage_collector=usage_collector,
             context_window_manager=manager,
+            hook_engine=hook_engine,  # type: ignore[arg-type]
         ),
         manager,
         estimator,
@@ -547,9 +567,11 @@ def terminal_events(events: list[AgentEvent]) -> list[AgentEvent]:
 async def test_agent_loop_prepares_compaction_and_records_primary_usage() -> None:
     provider = IntegratedCompactionProvider()
     collector = RecordingUsageCollector()
+    hooks = RecordingHookEngine()
     loop, manager, estimator = make_integrated_compaction_loop(
         provider,
         usage_collector=collector,
+        hook_engine=hooks,
     )
     history = ConversationHistory()
     history.add_assistant("旧回复")
@@ -582,6 +604,16 @@ async def test_agent_loop_prepares_compaction_and_records_primary_usage() -> Non
         "agent",
     ]
     assert events[-1] == FinalResponseEvent("完成", 1)
+    compaction_hooks = [
+        (event, values)
+        for event, values in hooks.events
+        if event.startswith("context.")
+    ]
+    assert [event for event, _ in compaction_hooks] == [
+        "context.before_compaction",
+        "context.after_compaction",
+    ]
+    assert compaction_hooks[1][1]["compaction.success"] is True
 
 
 @pytest.mark.asyncio
@@ -727,6 +759,59 @@ async def test_loop_builds_append_only_provider_requests_by_round() -> None:
         item.sequence for item in first_controls
     )
     assert provider.requests[0].tools is not None
+
+
+@pytest.mark.asyncio
+async def test_loop_emits_message_and_round_hook_lifecycle() -> None:
+    hooks = RecordingHookEngine()
+    loop = make_loop(
+        ScriptedProvider(
+            [[ProviderTextDelta("完成"), ProviderTurnEnd("end_turn")]]
+        ),
+        make_registry(),
+        hook_engine=hooks,
+    )
+
+    events = await collect_run(loop, "任务原文", ConversationHistory())
+
+    assert events[-1] == FinalResponseEvent("完成", 1)
+    assert hooks.flushes == 1
+    assert [event for event, _ in hooks.events] == [
+        "message.before_send",
+        "round.started",
+        "message.after_receive",
+        "round.ended",
+    ]
+    assert hooks.events[0][1] == {
+        "message.content": "任务原文",
+        "message.kind": "user",
+    }
+    assert hooks.events[-1][1]["round.outcome"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_loop_emits_system_error_and_failed_round_hook() -> None:
+    hooks = RecordingHookEngine()
+    loop = make_loop(
+        ScriptedProvider([ProviderError("已脱敏错误")]),
+        make_registry(),
+        hook_engine=hooks,
+    )
+
+    events = await collect_run(loop, "任务", ConversationHistory())
+
+    assert events[-1] == RunErrorEvent("provider_error", "已脱敏错误")
+    assert [event for event, _ in hooks.events] == [
+        "message.before_send",
+        "round.started",
+        "system.error",
+        "round.ended",
+    ]
+    assert hooks.events[2][1] == {
+        "error.code": "provider_error",
+        "error.message": "已脱敏错误",
+    }
+    assert hooks.events[-1][1]["round.outcome"] == "failed"
 
 
 @pytest.mark.asyncio

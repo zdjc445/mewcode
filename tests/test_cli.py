@@ -71,6 +71,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
                 scheduler: object,
                 context_window_manager: object,
                 visible_tool_names: object,
+                hook_engine: object,
         ) -> None:
             agent_loop_calls.append(
                 {
@@ -81,6 +82,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
                         "scheduler": scheduler,
                         "context_window_manager": context_window_manager,
                         "visible_tool_names": visible_tool_names,
+                        "hook_engine": hook_engine,
                 }
             )
 
@@ -121,6 +123,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
     assert agent_loop_calls[0]["scheduler"] is not None
     assert agent_loop_calls[0]["context_window_manager"] is not None
     assert callable(agent_loop_calls[0]["visible_tool_names"])
+    assert agent_loop_calls[0]["hook_engine"] is not None
     artifact_root = tmp_path / "home" / ".mewcode-agent" / "context-artifacts"
     assert artifact_root.is_dir()
     assert tuple(artifact_root.iterdir()) == ()
@@ -245,6 +248,47 @@ def test_cli_reports_invalid_security_config(
     assert "mode 必须为 strict、default 或 permissive" in error
 
 
+def test_cli_reports_invalid_hook_config_with_rule_location(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+    capsys,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    home_path = tmp_path / "home"
+    hook_path = home_path / ".mewcode-agent" / "hooks.yaml"
+    hook_path.parent.mkdir(parents=True)
+    hook_path.write_text(
+        """version: 1
+rules:
+  - id: invalid
+    event: unknown.event
+    once: false
+    async: false
+    timeout_seconds: 10
+    match: {}
+    action:
+      type: shell
+      command: echo secret-command
+      cwd: project
+    intercept: null
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+
+    assert cli.main() == 1
+    error = capsys.readouterr().err
+    assert "启动失败：" in error
+    assert "用户 Hook 配置.rules[0].event 无效" in error
+    assert "secret-command" not in error
+
+
 def test_cli_loads_security_layers_and_injects_policy_scheduler(
     tmp_path: Path,
     valid_config_text: str,
@@ -365,6 +409,7 @@ def test_cli_builds_prompt_dependencies_from_exact_two_layers(
             "scheduler",
             "context_window_manager",
             "visible_tool_names",
+            "hook_engine",
         }
     composer = calls[0]["prompt_composer"]
     frame = composer.compose([], ())  # type: ignore[union-attr]

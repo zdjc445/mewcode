@@ -31,6 +31,14 @@ class HookPromptSink(Protocol):
         rule_id: str,
     ) -> None: ...
 
+    async def flush(self) -> tuple[str, ...]: ...
+
+    def reset_session(
+        self,
+        *,
+        preserve_rule_ids: frozenset[str],
+    ) -> int: ...
+
     def discard_pending(self) -> int: ...
 
 
@@ -264,3 +272,15 @@ class HookActionRunner:
         pending = self._prompt_sink.discard_pending()
         await self._http_client.aclose()
         return pending
+
+    async def flush_pending_prompts(self) -> tuple[str, ...]:
+        return await self._prompt_sink.flush()
+
+    def reset_prompt_session(
+        self,
+        *,
+        preserve_rule_ids: frozenset[str],
+    ) -> int:
+        return self._prompt_sink.reset_session(
+            preserve_rule_ids=preserve_rule_ids
+        )

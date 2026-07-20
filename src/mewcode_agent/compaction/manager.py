@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from mewcode_agent.compaction.estimator import ContextTokenEstimator
@@ -35,7 +36,10 @@ from mewcode_agent.providers.base import (
     ProviderUsageResult,
 )
 
-ContextSummaryStartHandler = Callable[[int, int, int], None]
+ContextSummaryStartHandler = Callable[
+    [int, int, int],
+    Awaitable[None] | None,
+]
 ContextSummaryUsageHandler = Callable[[int, ProviderUsageResult], None]
 
 
@@ -382,11 +386,13 @@ class ContextWindowManager:
                         if self._checkpoint is not None
                         else 1
                     )
-                    on_summary_start(
+                    start_result = on_summary_start(
                         generation,
                         boundary,
                         before.estimated_prompt_tokens,
                     )
+                    if inspect.isawaitable(start_result):
+                        await start_result
                 preparation = await self._summarize_to_boundary(
                     history,
                     frame,
@@ -430,6 +436,7 @@ class ContextWindowManager:
         *,
         compose_frame: Callable[[], PromptFrame],
         tools: tuple[dict[str, Any], ...] | None,
+        on_summary_start: ContextSummaryStartHandler | None = None,
         on_summary_usage: ContextSummaryUsageHandler | None = None,
     ) -> ManualCompactionResult:
         await self.compact_tool_results(history)
@@ -500,6 +507,19 @@ class ContextWindowManager:
 
         async with self._summary_lock:
             try:
+                if on_summary_start is not None:
+                    generation = (
+                        self._checkpoint.generation + 1
+                        if self._checkpoint is not None
+                        else 1
+                    )
+                    start_result = on_summary_start(
+                        generation,
+                        boundary,
+                        before.estimated_prompt_tokens,
+                    )
+                    if inspect.isawaitable(start_result):
+                        await start_result
                 prepared = await self._summarize_to_boundary(
                     history,
                     frame,
