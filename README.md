@@ -145,6 +145,25 @@ servers:
 
 `required: true` 的 server 激活失败会阻止应用启动；optional server 失败时会输出不含 secret 的警告并跳过。远端工具默认安全类别为 `command`，因此在 `default` 安全模式下需要审批；只有在 `tool_categories` 中用精确、区分大小写的远端工具名声明后，才会改为 `read` 或 `write`。MCP annotations 不会改变安全分类。
 
+## 上下文压缩
+
+每次普通模型请求前按固定顺序执行两层上下文处理：
+
+1. 单个工具结果严格大于 `64 KiB`，或同一工具批次的内联合计严格大于 `128 KiB` 时，把完整紧凑 JSON 写入当前会话的 artifact 目录；历史只保留头尾正文预算为 `8 KiB` 的预览、绝对路径、SHA-256 和原始字节数。
+2. Prompt 估值达到有效窗口的 `80%` 时，使用当前 Provider 和模型发起 `tools=None` 的结构化摘要请求；新 checkpoint 只有在估值下降并达到 `60%` 目标后才会提交。
+
+用户原始消息不会交给摘要模型改写。压缩投影仍以原始 `user` 消息保留每条用户输入，并由代码在 checkpoint 中生成逐字符相同的校验副本。摘要后的边界消息要求模型在需要精确文件、代码、日志或工具结果时重新读取，不能根据摘要补全细节。
+
+外置文件位于：
+
+```text
+Path.home() / ".mewcode-agent" / "context-artifacts" / <session_id> / "tool-results"
+```
+
+只有本次会话已登记的精确绝对路径可以通过 `read_context_artifact` 分页读取。应用正常退出时删除当前 session 目录；下次启动清理超过 `24` 小时且名称严格匹配会话 ID 格式的崩溃遗留目录。
+
+在没有活动 Agent run 时输入精确命令 `/compact`，可手动压缩历史并默认保留最新 `4` 个原子历史单元。大小写不同、携带参数或包含其他非空文本的输入按普通用户消息处理。自动摘要连续失败 `3` 次后熔断；手动压缩成功会恢复自动压缩。
+
 ## 启动
 
 必须从项目根目录执行：
@@ -179,12 +198,12 @@ uv run python -m compileall -q src tests integration_tests
 
 - 支持流式响应。
 - 支持当前进程内的多轮对话。
-- 内置 `read_file`、`write_file`、`edit_file`、`run_command`、`find_files` 和 `search_code` 六个工具。
+- 内置 `read_file`、`write_file`、`edit_file`、`run_command`、`find_files`、`search_code` 和会话限定的 `read_context_artifact`。
 - 支持通过 stdio 或 Streamable HTTP 发现并复用 MCP 远端工具；当前只实现 MCP Tools，不实现 Resources、Prompts、OAuth 或 Tasks。
-- 每次用户请求最多执行 10 个工具；工具结果会立即写入对话历史并回灌模型，直到模型返回最终文本。
+- 每次用户请求最多执行 `15` 个模型轮；工具结果会立即写入对话历史并回灌模型，直到模型返回最终文本。
 - 模型在同一次响应中返回多个工具调用时，按响应索引顺序逐个执行。
-- 达到 10 次工具调用上限后，应用会关闭工具并要求模型根据已有结果生成最终总结。
+- 第 `15` 个模型轮不提供工具定义，并要求模型根据已有结果生成最终答复。
 - 文件工具支持项目内的相对路径和绝对路径；规范化结果超出启动工作目录时拒绝执行。
 - 工具失败以结构化结果写入历史，不会导致应用退出。
-- 不保存会话文件。
-- 不包含斜杠命令或上下文压缩。
+- 不持久化对话历史；上下文 artifact 只在当前进程会话内使用，并在正常退出时删除。
+- 支持精确 `/compact` 手动命令和自动两级上下文压缩；不实现跨进程会话恢复、长期记忆或向量检索。

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,10 +33,12 @@ from mewcode_agent.agent import (
 from mewcode_agent.compaction import (
     SUMMARY_SYSTEM_PROMPT,
     CompactionConfig,
+    ContextArtifactStore,
     ContextEstimate,
     ContextSummarizer,
     ContextWindowManager,
     ToolCompactionResult,
+    ToolResultCompactor,
 )
 from mewcode_agent.prompting.builtins import BUILTIN_MODULES
 from mewcode_agent.prompting.composer import PromptComposer
@@ -57,6 +60,7 @@ from mewcode_agent.providers.base import (
     ProviderError,
     ProviderProtocol,
     ProviderRequest,
+    ProviderStopReason,
     ProviderStreamEvent,
     ProviderTextDelta,
     ProviderThinkingComplete,
@@ -67,7 +71,7 @@ from mewcode_agent.providers.base import (
     ProviderUsageEvent,
     ProviderUsageResult,
 )
-from mewcode_agent.tools import Tool, ToolRegistry
+from mewcode_agent.tools import ReadContextArtifactTool, Tool, ToolRegistry
 
 
 ZERO_USAGE_RESULT = ProviderUsageResult(
@@ -201,7 +205,7 @@ class IntegratedCompactionProvider:
     def prompt_payload(self, request: ProviderRequest) -> dict[str, Any]:
         return {
             "system": request.system_prompt,
-            "items": [str(item) for item in request.items],
+            "messages": [str(item) for item in request.items],
             "tools": request.tools,
         }
 
@@ -242,6 +246,84 @@ class IntegratedCompactionProvider:
         yield ProviderTextDelta("完成")
         yield ProviderUsageEvent(ZERO_USAGE_RESULT)
         yield ProviderTurnEnd("end_turn")
+
+
+class HugeReadTool(Tool):
+    name = "huge_read"
+    description = "Return a large deterministic payload"
+    parameters = {"type": "object", "properties": {}}
+    category = "read"
+
+    async def execute(self, arguments: dict[str, Any]) -> dict[str, str]:
+        del arguments
+        return {"blob": "x" * 70000}
+
+
+class ArtifactRecoveryProvider:
+    provider_id = "test_provider"
+    protocol: ProviderProtocol = "openai"
+
+    def __init__(self) -> None:
+        self.requests: list[ProviderRequest] = []
+        self.artifact_path: str | None = None
+        self.recovered_content: str | None = None
+
+    def prompt_payload(self, request: ProviderRequest) -> dict[str, Any]:
+        return {
+            "system": request.system_prompt,
+            "messages": [str(item) for item in request.items],
+            "tools": request.tools,
+        }
+
+    async def stream_chat(
+        self,
+        request: ProviderRequest,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        self.requests.append(request)
+        call_number = len(self.requests)
+        if call_number == 1:
+            yield ProviderToolCall(ToolCall("huge", "huge_read", "{}"))
+            stop_reason: ProviderStopReason = "tool_calls"
+        elif call_number == 2:
+            tool_message = next(
+                item
+                for item in request.items
+                if isinstance(item, ChatMessage)
+                and item.role == "tool"
+                and item.tool_call_id == "huge"
+            )
+            preview = json.loads(tool_message.content)
+            self.artifact_path = preview["data"]["externalized"]["path"]
+            arguments = json.dumps(
+                {
+                    "path": self.artifact_path,
+                    "offset": 0,
+                    "limit": 8192,
+                },
+                separators=(",", ":"),
+            )
+            yield ProviderToolCall(
+                ToolCall(
+                    "recover",
+                    "read_context_artifact",
+                    arguments,
+                )
+            )
+            stop_reason = "tool_calls"
+        else:
+            tool_message = next(
+                item
+                for item in request.items
+                if isinstance(item, ChatMessage)
+                and item.role == "tool"
+                and item.tool_call_id == "recover"
+            )
+            recovered = json.loads(tool_message.content)
+            self.recovered_content = recovered["data"]["content"]
+            yield ProviderTextDelta("已恢复")
+            stop_reason = "end_turn"
+        yield ProviderUsageEvent(ZERO_USAGE_RESULT)
+        yield ProviderTurnEnd(stop_reason)
 
 
 class EchoReadTool(Tool):
@@ -529,6 +611,60 @@ async def test_agent_loop_cancels_inflight_automatic_summary_transaction() -> No
     assert provider.summary_cancelled is True
     assert manager.checkpoint is None
     assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_externalizes_and_recovers_large_tool_result(
+    tmp_path: Path,
+) -> None:
+    store = ContextArtifactStore(root=tmp_path / "artifacts")
+    await store.initialize()
+    provider = ArtifactRecoveryProvider()
+    registry = ToolRegistry()
+    registry.register(HugeReadTool())
+    registry.register(ReadContextArtifactTool(store))
+    runtime, composer = make_prompt_dependencies()
+    manager = ContextWindowManager(
+        provider,
+        ToolResultCompactor(store),
+        ContextSummarizer(provider, timeout_seconds=10),
+        context_window_tokens=1_000_000,
+        max_tokens=4096,
+    )
+    loop = AgentLoop(
+        provider,
+        registry,
+        prompt_runtime=runtime,
+        prompt_composer=composer,
+        context_window_manager=manager,
+    )
+    history = ConversationHistory()
+
+    try:
+        events = await collect_run(loop, "读取大结果", history)
+
+        assert events[-1] == FinalResponseEvent("已恢复", 3)
+        assert provider.artifact_path is not None
+        artifact_path = Path(provider.artifact_path)
+        assert artifact_path.is_file()
+        assert provider.recovered_content is not None
+        assert provider.recovered_content.startswith(
+            '{"tool_name":"huge_read","success":true,'
+        )
+        huge_result = next(
+            message
+            for message in history.snapshot()
+            if message.role == "tool" and message.tool_call_id == "huge"
+        )
+        externalized = json.loads(huge_result.content)["data"][
+            "externalized"
+        ]
+        assert externalized["path"] == provider.artifact_path
+        assert externalized["reader_tool"] == "read_context_artifact"
+    finally:
+        await store.close()
+
+    assert not store.session_directory.exists()
 
 
 @pytest.mark.parametrize(

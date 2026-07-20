@@ -92,6 +92,9 @@ def test_cli_builds_and_runs_app_with_valid_config(
     assert registry.get("read_context_artifact") is not None
     assert agent_loop_calls[0]["scheduler"] is not None
     assert agent_loop_calls[0]["context_window_manager"] is not None
+    artifact_root = tmp_path / "home" / ".mewcode-agent" / "context-artifacts"
+    assert artifact_root.is_dir()
+    assert tuple(artifact_root.iterdir()) == ()
 
 
 def test_cli_reports_invalid_security_config(
