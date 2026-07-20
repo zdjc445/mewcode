@@ -11,6 +11,10 @@ import shutil
 from mewcode_agent.worktrees.models import WorktreeError, validate_object_id
 
 
+class _GitOutputLimit(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class GitCommandResult:
     returncode: int
@@ -62,15 +66,16 @@ class GitRunner:
             raise WorktreeError(error_code, "Git 子进程启动失败") from exc
         try:
             async with asyncio.timeout(timeout_seconds):
-                stdout, stderr = await process.communicate()
+                stdout, stderr = await self._communicate_limited(process)
+        except _GitOutputLimit as exc:
+            await self._stop(process)
+            raise WorktreeError(error_code, "Git 命令输出超过限制") from exc
         except TimeoutError as exc:
             await self._stop(process)
             raise WorktreeError("worktree_git_timeout", "Git 命令超时") from exc
         except asyncio.CancelledError:
             await self._stop(process)
             raise
-        if len(stdout) > self._output_limit or len(stderr) > self._output_limit:
-            raise WorktreeError(error_code, "Git 命令输出超过限制")
         try:
             decoded = stdout.decode("utf-8", errors="strict").rstrip("\r\n")
             stderr.decode("utf-8", errors="strict")
@@ -80,6 +85,39 @@ class GitRunner:
         if check and result.returncode != 0:
             raise WorktreeError(error_code, "Git 命令返回非零状态")
         return result
+
+    async def _communicate_limited(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> tuple[bytes, bytes]:
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError("Git pipes unavailable")
+
+        async def read(stream: asyncio.StreamReader) -> bytes:
+            chunks: list[bytes] = []
+            size = 0
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    return b"".join(chunks)
+                size += len(chunk)
+                if size > self._output_limit:
+                    raise _GitOutputLimit
+                chunks.append(chunk)
+
+        tasks = (
+            asyncio.create_task(read(process.stdout)),
+            asyncio.create_task(read(process.stderr)),
+        )
+        try:
+            stdout, stderr = await asyncio.gather(*tasks)
+            await process.wait()
+            return stdout, stderr
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     @staticmethod
     async def _stop(process: asyncio.subprocess.Process) -> None:

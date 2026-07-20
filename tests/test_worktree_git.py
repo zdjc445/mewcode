@@ -24,9 +24,8 @@ class _HangingProcess:
         self.terminated = False
         self.killed = False
         self.waited = False
-
-    async def communicate(self):
-        await asyncio.Event().wait()
+        self.stdout = _HangingStream()
+        self.stderr = _HangingStream()
 
     def terminate(self) -> None:
         self.terminated = True
@@ -38,6 +37,38 @@ class _HangingProcess:
         self.waited = True
         self.returncode = -15
         return self.returncode
+
+
+class _HangingStream:
+    async def read(self, _size: int) -> bytes:
+        await asyncio.Event().wait()
+        return b""
+
+
+class _CompletedProcess:
+    def __init__(self, stdout: bytes, stderr: bytes = b"") -> None:
+        self.returncode: int | None = None
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stdout.feed_data(stdout)
+        self.stdout.feed_eof()
+        self.stderr.feed_data(stderr)
+        self.stderr.feed_eof()
+        self.terminated = False
+        self.waited = False
+
+    async def wait(self) -> int:
+        self.waited = True
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.returncode = -9
 
 
 def _linked_layout(tmp_path: Path, *, loose: bool) -> tuple[Path, Path, str]:
@@ -189,5 +220,30 @@ async def test_git_runner_cancellation_terminates_and_reaps(
     with pytest.raises(asyncio.CancelledError):
         await task
 
+    assert process.terminated is True
+    assert process.waited is True
+
+
+async def test_git_runner_enforces_output_limit_before_success(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    executable = tmp_path / "git.exe"
+    executable.touch()
+    process = _CompletedProcess(b"12345")
+
+    async def create_process(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    runner = GitRunner(
+        git_finder=lambda _name: str(executable),
+        output_limit=4,
+    )
+
+    with pytest.raises(WorktreeError) as caught:
+        await runner.run(tmp_path.resolve(), "status")
+
+    assert caught.value.code == "worktree_status_failed"
     assert process.terminated is True
     assert process.waited is True

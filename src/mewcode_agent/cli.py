@@ -736,8 +736,11 @@ async def run_application(
     except OSError:
         print("启动失败：无法解析当前工作目录", file=sys.stderr)
         return 1
-    except (RuntimeError, WorktreeConfigError, WorktreeError) as exc:
+    except (WorktreeConfigError, WorktreeError) as exc:
         print(f"启动失败：{exc}", file=sys.stderr)
+        return 1
+    except RuntimeError:
+        print("启动失败：无法解析启动环境", file=sys.stderr)
         return 1
 
     while True:
