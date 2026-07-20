@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -54,10 +57,17 @@ class HookEngine:
         }
         self._action_runner = action_runner
         self._project_root = project_root
+        self._project_root_binding: ContextVar[Path | None] = ContextVar(
+            f"mewcode_hook_engine_root_{id(self)}",
+            default=None,
+        )
         self._session_id_provider = session_id_provider
         self._diagnostic_handler = diagnostic_handler
         self._once_consumed: set[str] = set()
         self._background_tasks: set[asyncio.Task[None]] = set()
+        self._background_project_roots: dict[
+            asyncio.Task[None], Path
+        ] = {}
         self._event_sequence = 0
         self._closing = False
         self._closed = False
@@ -65,6 +75,26 @@ class HookEngine:
         self._accept_background = True
         self._close_lock = asyncio.Lock()
         self._close_result: HookCloseResult | None = None
+
+    @property
+    def project_root(self) -> Path:
+        return self._project_root_binding.get() or self._project_root
+
+    @contextmanager
+    def bind_project_root(self, path: Path) -> Iterator[Path]:
+        if not isinstance(path, Path) or not path.is_absolute():
+            raise ValueError("project_root binding 必须是绝对 Path")
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("无法解析 project_root binding") from exc
+        if not resolved.is_dir():
+            raise ValueError("project_root binding 不是目录")
+        token = self._project_root_binding.set(resolved)
+        try:
+            yield resolved
+        finally:
+            self._project_root_binding.reset(token)
 
     async def dispatch(
         self,
@@ -182,7 +212,8 @@ class HookEngine:
                             )
                         )
                         self._background_tasks.add(task)
-                        task.add_done_callback(self._background_tasks.discard)
+                        self._background_project_roots[task] = self.project_root
+                        task.add_done_callback(self._background_finished)
                 else:
                     await self._execute_rule(
                         rule,
@@ -194,6 +225,21 @@ class HookEngine:
             if block_reason is not None:
                 return HookDispatchResult(True, block_reason)
         return HookDispatchResult()
+
+    def _background_finished(self, task: asyncio.Task[None]) -> None:
+        self._background_tasks.discard(task)
+        self._background_project_roots.pop(task, None)
+
+    async def drain_project_root(self, path: Path) -> int:
+        root = path.resolve(strict=False)
+        tasks = tuple(
+            task
+            for task, task_root in self._background_project_roots.items()
+            if task_root == root
+        )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return len(tasks)
 
     def _build_context(
         self,
@@ -208,7 +254,7 @@ class HookEngine:
         context: dict[str, Any] = {
             "event.name": event,
             "event.sequence": sequence,
-            "project.root": str(self._project_root),
+            "project.root": str(self.project_root),
         }
         resolved_session_id = session_id
         if (

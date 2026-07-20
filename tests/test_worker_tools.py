@@ -87,6 +87,7 @@ async def test_definition_returns_foreground_result(tmp_path: Path) -> None:
     assert result["mode"] == "foreground"
     assert result["type"] == "example"
     assert result["result"] == "done"
+    assert result["workspace"] is None
     await manager.close()
 
 
@@ -122,7 +123,7 @@ async def test_unknown_type_has_stable_error(tmp_path: Path) -> None:
     await manager.close()
 
 
-async def test_worktree_role_is_unavailable_before_chapter_12(
+async def test_worktree_role_is_dispatched_to_executor(
     tmp_path: Path,
 ) -> None:
     tool, manager = setup_tool(
@@ -130,8 +131,8 @@ async def test_worktree_role_is_unavailable_before_chapter_12(
         definition=role(tmp_path, isolation="worktree"),
     )
 
-    with pytest.raises(ToolExecutionError) as caught:
-        await tool.execute({"task": "x", "type": "example"})
+    result = await tool.execute({"task": "x", "type": "example"})
 
-    assert caught.value.code == "worker_isolation_unavailable"
+    assert result["status"] == "completed"
+    assert result["type"] == "example"
     await manager.close()

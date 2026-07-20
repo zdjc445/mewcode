@@ -9,6 +9,11 @@ from mewcode_agent.worktrees.git import (
 from mewcode_agent.worktrees.loader import load_worktree_config
 from mewcode_agent.worktrees.initializer import WorktreeInitializer
 from mewcode_agent.worktrees.manager import WorktreeManager
+from mewcode_agent.worktrees.runtime import (
+    bind_worktree_runtime,
+    fork_worktree_prompt_runtime,
+    worktree_worker_control,
+)
 from mewcode_agent.worktrees.models import (
     WorktreeCloseResult,
     WorktreeConfigError,
@@ -51,6 +56,8 @@ __all__ = [
     "WorktreeState",
     "WorktreeStatus",
     "WorktreeSwitchResult",
+    "bind_worktree_runtime",
+    "fork_worktree_prompt_runtime",
     "load_worktree_config",
     "load_worktree_state",
     "managed_worktree_path",
@@ -63,5 +70,6 @@ __all__ = [
     "validate_worktree_name",
     "worktree_branch_name",
     "worktree_state_lock",
+    "worktree_worker_control",
     "write_worktree_state",
 ]

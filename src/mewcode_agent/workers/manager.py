@@ -19,6 +19,7 @@ from mewcode_agent.workers.models import (
     WorkerState,
     WorkerTaskSnapshot,
     WorkerTransition,
+    WorkerWorkspaceSnapshot,
 )
 from mewcode_agent.workers.usage import WorkerUsageCollector
 
@@ -28,6 +29,7 @@ WorkerRunner = Callable[
     Awaitable[WorkerExecutionOutcome],
 ]
 WorkerCancelRunner = Callable[[str], bool]
+WorkerWorkspaceProvider = Callable[[str], WorkerWorkspaceSnapshot | None]
 
 
 @dataclass(slots=True)
@@ -54,6 +56,7 @@ class WorkerManager:
         *,
         now: Callable[[], datetime] | None = None,
         cancel_runner: WorkerCancelRunner | None = None,
+        workspace_provider: WorkerWorkspaceProvider | None = None,
     ) -> None:
         if not callable(runner):
             raise ValueError("runner 必须可调用")
@@ -61,6 +64,7 @@ class WorkerManager:
         self._runner = runner
         self._now = now or (lambda: datetime.now().astimezone())
         self._cancel_runner = cancel_runner
+        self._workspace_provider = workspace_provider
         self._records: dict[str, _WorkerRecord] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._notifications: dict[str, list[str]] = {}
@@ -306,8 +310,7 @@ class WorkerManager:
             raise WorkerError("worker_task_not_found", "Worker task 不存在")
         return record
 
-    @staticmethod
-    def _snapshot(record: _WorkerRecord) -> WorkerTaskSnapshot:
+    def _snapshot(self, record: _WorkerRecord) -> WorkerTaskSnapshot:
         spec = record.spec
         return WorkerTaskSnapshot(
             spec.task_id,
@@ -328,10 +331,14 @@ class WorkerManager:
             record.result,
             record.error_code,
             record.report_format_valid,
+            (
+                None
+                if self._workspace_provider is None
+                else self._workspace_provider(spec.task_id)
+            ),
         )
 
-    @staticmethod
-    def _notification(record: _WorkerRecord) -> WorkerNotification:
+    def _notification(self, record: _WorkerRecord) -> WorkerNotification:
         assert record.state in ("completed", "failed", "cancelled")
         result = record.result or ""
         if len(result) > 8000:
@@ -344,4 +351,9 @@ class WorkerManager:
             record.usage.snapshot(),
             result,
             record.error_code,
+            (
+                None
+                if self._workspace_provider is None
+                else self._workspace_provider(record.spec.task_id)
+            ),
         )

@@ -92,6 +92,87 @@ async def test_engine_runs_in_order_and_once_is_process_lifetime(
     assert runner.closed == 1
 
 
+async def test_engine_project_root_binding_is_in_context_and_resets(
+    tmp_path: Path,
+) -> None:
+    default = (tmp_path / "default").resolve()
+    bound = (tmp_path / "bound").resolve()
+    default.mkdir()
+    bound.mkdir()
+
+    class ContextRunner(FakeActionRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.roots: list[str] = []
+
+        def prepare(self, action: Any, context: dict[str, object]) -> str:
+            self.roots.append(str(context["project.root"]))
+            return super().prepare(action, context)
+
+    runner = ContextRunner()
+    engine = HookEngine(
+        HookConfiguration((make_rule("root"),)),
+        runner,  # type: ignore[arg-type]
+        project_root=default,
+    )
+
+    with engine.bind_project_root(bound):
+        assert engine.project_root == bound
+        await engine.dispatch(
+            "tool.before_execute",
+            {"tool.name": "write_file"},
+        )
+    assert engine.project_root == default
+    await engine.dispatch(
+        "tool.before_execute",
+        {"tool.name": "write_file"},
+    )
+    await engine.close()
+
+    assert runner.roots == [str(bound), str(default)]
+
+
+async def test_background_hook_binding_is_inherited_and_drainable(
+    tmp_path: Path,
+) -> None:
+    default = (tmp_path / "default").resolve()
+    bound = (tmp_path / "bound").resolve()
+    default.mkdir()
+    bound.mkdir()
+
+    class ContextRunner(FakeActionRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.roots: list[str] = []
+
+        def prepare(self, action: Any, context: dict[str, object]) -> str:
+            self.roots.append(str(context["project.root"]))
+            return super().prepare(action, context)
+
+    runner = ContextRunner()
+    runner.gates["background"] = asyncio.Event()
+    engine = HookEngine(
+        HookConfiguration((make_rule("background", run_async=True),)),
+        runner,  # type: ignore[arg-type]
+        project_root=default,
+    )
+
+    with engine.bind_project_root(bound):
+        await engine.dispatch(
+            "tool.before_execute",
+            {"tool.name": "write_file"},
+        )
+    await asyncio.sleep(0)
+    drain = asyncio.create_task(engine.drain_project_root(bound))
+    await asyncio.sleep(0)
+
+    assert not drain.done()
+    runner.gates["background"].set()
+    assert await drain == 1
+    assert runner.roots == [str(bound)]
+    await engine.close()
+
+
 async def test_engine_background_task_is_drained_on_close(
     tmp_path: Path,
 ) -> None:

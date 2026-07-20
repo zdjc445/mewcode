@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,48 @@ def test_path_sandbox_rejects_symlink_escape(tmp_path: Path) -> None:
 
     with pytest.raises(PathSandboxError, match="超出"):
         PathSandbox(tmp_path).resolve("external/secret.txt")
+
+
+def test_path_sandbox_binding_restricts_root_and_resets(tmp_path: Path) -> None:
+    default = (tmp_path / "default").resolve()
+    bound = (default / "managed").resolve()
+    default.mkdir()
+    bound.mkdir()
+    sandbox = PathSandbox(default)
+
+    with sandbox.bind_working_directory(bound):
+        assert sandbox.working_directory == bound
+        assert sandbox.roots == (bound,)
+        assert sandbox.resolve("file.txt") == bound / "file.txt"
+        with pytest.raises(PathSandboxError):
+            sandbox.resolve(default / "outside.txt")
+
+    assert sandbox.working_directory == default
+    assert sandbox.roots == (default,)
+
+
+async def test_path_sandbox_bindings_are_task_local(tmp_path: Path) -> None:
+    default = (tmp_path / "default").resolve()
+    first = (default / "first").resolve()
+    second = (default / "second").resolve()
+    first.mkdir(parents=True)
+    second.mkdir()
+    sandbox = PathSandbox(default)
+    ready = asyncio.Event()
+
+    async def observe(path: Path) -> Path:
+        with sandbox.bind_working_directory(path):
+            ready.set()
+            await ready.wait()
+            return sandbox.resolve("result.txt")
+
+    results = await asyncio.gather(
+        observe(first),
+        observe(second),
+    )
+
+    assert results == [first / "result.txt", second / "result.txt"]
+    assert sandbox.working_directory == default
 
 
 @pytest.mark.parametrize(

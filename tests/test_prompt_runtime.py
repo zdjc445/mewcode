@@ -95,6 +95,32 @@ def test_session_controls_reject_non_session_scope() -> None:
         )
 
 
+async def test_fork_can_replace_session_and_request_environments() -> None:
+    class ReplacementCollector:
+        async def collect(self) -> RequestEnvironment:
+            return RequestEnvironment(
+                "2026-07-21T12:00:00+08:00",
+                GitEnvironment("not_repository", None, None, None),
+            )
+
+    runtime = make_runtime()
+    replacement_session = SessionEnvironment(
+        "Windows",
+        "powershell.exe",
+        "D:\\workspace\\isolated",
+        "China Standard Time",
+        "+08:00",
+    )
+    forked = runtime.fork_current_session(
+        session_environment=replacement_session,
+        request_environment_collector=ReplacementCollector(),
+    )
+
+    assert "D:\\\\workspace\\\\isolated" in forked.timeline()[0].content
+    await forked.begin_request(history_length=0, mode="executing")
+    assert '"state":"not_repository"' in forked.timeline()[1].content
+
+
 @pytest.mark.asyncio
 async def test_dynamic_session_controls_replace_during_active_request() -> None:
     runtime = make_runtime()

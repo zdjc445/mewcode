@@ -102,6 +102,11 @@ from mewcode_agent.workers import (
     builtin_worker_root,
     scan_worker_catalog,
 )
+from mewcode_agent.worktrees import (
+    WorktreeConfigError,
+    WorktreeManager,
+    load_worktree_config,
+)
 
 CONFIG_FILENAME = "llm_providers.yaml"
 
@@ -178,6 +183,7 @@ async def run_application() -> int:
     hook_lifecycle: HookLifecycle | None = None
     hook_lifecycle_started = False
     worker_manager: WorkerManager | None = None
+    worktree_manager: WorktreeManager | None = None
     try:
         session_environment = collect_session_environment()
         working_directory = Path(
@@ -191,6 +197,15 @@ async def run_application() -> int:
                 "无法解析用户全局 Prompt 配置路径"
             ) from exc
         user_prompt_path = user_config_directory / "prompts.yaml"
+        worktree_configuration = load_worktree_config(
+            user_config_directory / "worktrees.yaml"
+        )
+        worktree_manager = await WorktreeManager.open(
+            working_directory,
+            worktree_configuration,
+        )
+        if worktree_manager.available:
+            worktree_manager.start_cleanup()
         project_prompt_path = (
             working_directory / ".mewcode" / "prompts.yaml"
         )
@@ -407,14 +422,17 @@ async def run_application() -> int:
             policy_engine_factory=create_worker_policy,
             context_manager_factory=create_worker_context_manager,
             hook_engine=hook_engine,
+            hook_action_runner=hook_action_runner,
             prompt_hook_bridge=prompt_hook_bridge,
             skill_runtime=skill_runtime,
             load_skill_tool=load_skill_tool,
+            worktree_manager=worktree_manager,
         )
         worker_manager = WorkerManager(
             worker_snapshot.runtime_config,
             worker_executor.run,
             cancel_runner=worker_executor.cancel,
+            workspace_provider=worker_executor.workspace_snapshot,
         )
         provider_models = {
             provider_id: item.model
@@ -465,33 +483,39 @@ async def run_application() -> int:
         SkillConfigError,
         HookConfigError,
         WorkerConfigError,
+        WorktreeConfigError,
     ) as exc:
         try:
             if worker_manager is not None:
                 await worker_manager.close()
         finally:
             try:
-                if hook_engine is not None:
-                    await hook_engine.close()
-                elif hook_action_runner is not None:
-                    await hook_action_runner.close()
+                if worktree_manager is not None:
+                    await worktree_manager.close()
             finally:
                 try:
-                    if session_manager is not None:
-                        session_manager.close()
+                    if hook_engine is not None:
+                        await hook_engine.close()
+                    elif hook_action_runner is not None:
+                        await hook_action_runner.close()
                 finally:
                     try:
-                        if mcp_manager is not None:
-                            await mcp_manager.close()
+                        if session_manager is not None:
+                            session_manager.close()
                     finally:
-                        if artifact_store is not None:
-                            await artifact_store.close()
+                        try:
+                            if mcp_manager is not None:
+                                await mcp_manager.close()
+                        finally:
+                            if artifact_store is not None:
+                                await artifact_store.close()
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
     try:
         assert hook_engine is not None
         assert hook_action_runner is not None
         assert worker_manager is not None
+        assert worktree_manager is not None
 
         async def worker_request_controls() -> tuple[
             RuntimeInstruction, ...
@@ -646,24 +670,28 @@ async def run_application() -> int:
         assert hook_action_runner is not None
         assert hook_engine is not None
         assert worker_manager is not None
+        assert worktree_manager is not None
         try:
             await worker_manager.close()
         finally:
             try:
-                await notes_manager.flush_on_exit()
+                await worktree_manager.close()
             finally:
                 try:
-                    if hook_lifecycle_started and hook_lifecycle is not None:
-                        await hook_lifecycle.end_active_session()
-                    await hook_engine.close()
+                    await notes_manager.flush_on_exit()
                 finally:
                     try:
-                        session_manager.close()
+                        if hook_lifecycle_started and hook_lifecycle is not None:
+                            await hook_lifecycle.end_active_session()
+                        await hook_engine.close()
                     finally:
                         try:
-                            await mcp_manager.close()
+                            session_manager.close()
                         finally:
-                            await artifact_store.close()
+                            try:
+                                await mcp_manager.close()
+                            finally:
+                                await artifact_store.close()
 
 
 def main() -> int:

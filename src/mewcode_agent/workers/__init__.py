@@ -42,6 +42,7 @@ from mewcode_agent.workers.models import (
     WorkerSource,
     WorkerState,
     WorkerTaskSnapshot,
+    WorkerWorkspaceSnapshot,
     WorkerTransition,
     WorkerUsageSnapshot,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "WorkerState",
     "WorkerManager",
     "WorkerTaskSnapshot",
+    "WorkerWorkspaceSnapshot",
     "WorkerTransition",
     "WorkerUsageCollector",
     "WorkerUsageSnapshot",

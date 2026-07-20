@@ -98,11 +98,6 @@ class SpawnWorkerTool(Tool):
                 "worker_type_not_found",
                 "Worker type 不存在",
             )
-        if definition is not None and definition.isolation == "worktree":
-            raise ToolExecutionError(
-                "worker_isolation_unavailable",
-                "worktree 隔离将在 Chapter 12 接入",
-            )
         fork = raw_type is None
         background_requested = bool(arguments.get("background", False))
         background = fork or background_requested
@@ -149,6 +144,11 @@ class SpawnWorkerTool(Tool):
                     "mode": "background",
                     "type": snapshot.worker_type,
                     "transition": snapshot.transition,
+                    "workspace": (
+                        None
+                        if snapshot.workspace is None
+                        else snapshot.workspace.to_dict()
+                    ),
                 }
             snapshot = await self._manager.wait_foreground(snapshot.task_id)
         except WorkerError as exc:
@@ -160,9 +160,24 @@ class SpawnWorkerTool(Tool):
                 "mode": "background",
                 "type": snapshot.worker_type,
                 "transition": snapshot.transition,
+                "workspace": (
+                    None
+                    if snapshot.workspace is None
+                    else snapshot.workspace.to_dict()
+                ),
             }
         if snapshot.state != "completed" or snapshot.result is None:
-            raise ToolExecutionError("worker_failed", "Worker 未成功完成")
+            raise ToolExecutionError(
+                "worker_failed",
+                "Worker 未成功完成",
+                details={
+                    "workspace": (
+                        None
+                        if snapshot.workspace is None
+                        else snapshot.workspace.to_dict()
+                    )
+                },
+            )
         return {
             "task_id": snapshot.task_id,
             "status": "completed",
@@ -170,4 +185,9 @@ class SpawnWorkerTool(Tool):
             "type": snapshot.worker_type,
             "result": snapshot.result,
             "usage": snapshot.usage.to_dict(),
+            "workspace": (
+                None
+                if snapshot.workspace is None
+                else snapshot.workspace.to_dict()
+            ),
         }

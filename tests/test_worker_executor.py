@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+import shutil
+import subprocess
 from typing import Any
 
 import pytest
@@ -15,6 +17,8 @@ from mewcode_agent.prompting.environment import (
     GitEnvironment,
     RequestEnvironment,
     SessionEnvironment,
+    GitRequestEnvironmentCollector,
+    collect_session_environment,
 )
 from mewcode_agent.prompting.models import RuntimeInstruction
 from mewcode_agent.prompting.runtime import PromptRuntime
@@ -36,6 +40,7 @@ from mewcode_agent.security import (
     SecurityPolicyEngine,
 )
 from mewcode_agent.tools import Tool, ToolRegistry
+from mewcode_agent.tools.registry import create_core_registry
 from mewcode_agent.workers import (
     WorkerExecutionSpec,
     WorkerExecutor,
@@ -46,6 +51,7 @@ from mewcode_agent.workers import (
     fork_report_format_valid,
     visible_worker_tools,
 )
+from mewcode_agent.worktrees import WorktreeManager, WorktreeRuntimeConfig
 
 
 class FixedCollector:
@@ -191,6 +197,54 @@ def make_executor(
     )
 
 
+def git_repository(tmp_path: Path) -> Path:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git executable is unavailable")
+    root = (tmp_path / "repo").resolve()
+    root.mkdir()
+
+    def run(*arguments: str) -> None:
+        subprocess.run(
+            [executable, "-C", str(root), *arguments],
+            check=True,
+            capture_output=True,
+        )
+
+    run("init")
+    run("config", "user.name", "MewCode Tests")
+    run("config", "user.email", "tests@example.invalid")
+    (root / "tracked.txt").write_text("base\n", encoding="utf-8")
+    run("add", "tracked.txt")
+    run("commit", "-m", "base")
+    return root
+
+
+async def worktree_executor(
+    provider: ScriptedProvider,
+    root: Path,
+) -> tuple[WorkerExecutor, WorktreeManager]:
+    registry = create_core_registry(working_directory=root)
+    manager = await WorktreeManager.open(
+        root,
+        WorktreeRuntimeConfig(local_config_files=()),
+    )
+    runtime = PromptRuntime(
+        collect_session_environment(working_directory=root),
+        GitRequestEnvironmentCollector(working_directory=root),
+    )
+    executor = WorkerExecutor(
+        registry=registry,
+        parent_prompt_runtime=runtime,
+        prompt_composer=PromptComposer(BUILTIN_MODULES),
+        provider_resolver=lambda _provider_id: provider,
+        policy_engine_factory=lambda _mode: None,
+        context_manager_factory=lambda _provider: None,
+        worktree_manager=manager,
+    )
+    return executor, manager
+
+
 def test_fork_history_drops_current_incomplete_tool_batch() -> None:
     history = (
         ChatMessage("user", "old task"),
@@ -316,6 +370,83 @@ async def test_definition_executor_uses_empty_history_and_role_control(
         "completion_tokens": 3,
         "unavailable_rounds": 0,
     }
+
+
+async def test_worktree_worker_writes_only_isolated_root_and_is_preserved(
+    tmp_path: Path,
+) -> None:
+    root = git_repository(tmp_path)
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderToolCall(
+                    ToolCall(
+                        "write",
+                        "write_file",
+                        '{"path":"worker.txt","content":"isolated"}',
+                    )
+                ),
+                ProviderUsageEvent(
+                    ProviderUsageResult("unavailable", None, "not reported")
+                ),
+                ProviderTurnEnd("tool_calls"),
+            ],
+            completed_round("done"),
+        ]
+    )
+    executor, manager = await worktree_executor(provider, root)
+    definition = role(tmp_path, isolation="worktree")
+    worker_spec = spec(
+        tmp_path,
+        definition=definition,
+        visible=frozenset({"write_file"}),
+    )
+
+    outcome = await executor.run(worker_spec, WorkerUsageCollector())
+    workspace = executor.workspace_snapshot(worker_spec.task_id)
+
+    assert outcome.result == "done"
+    assert workspace is not None
+    assert workspace.preserved is True
+    assert workspace.reason == "worktree_dirty"
+    workspace_path = Path(workspace.path)
+    assert (workspace_path / "worker.txt").read_text(encoding="utf-8") == "isolated"
+    assert not (root / "worker.txt").exists()
+    request_controls = [
+        item
+        for item in provider.requests[0].items
+        if not isinstance(item, ChatMessage)
+    ]
+    assert any(
+        "Do not modify the main repository root" in item.content
+        for item in request_controls
+    )
+    assert str(workspace_path).replace("\\", "\\\\") in request_controls[0].content
+    await manager.delete(
+        f"worker/{worker_spec.task_id}",
+        discard_confirmed=True,
+    )
+    await manager.close()
+
+
+async def test_clean_worktree_worker_is_deleted_automatically(
+    tmp_path: Path,
+) -> None:
+    root = git_repository(tmp_path)
+    provider = ScriptedProvider([completed_round("done")])
+    executor, manager = await worktree_executor(provider, root)
+    definition = role(tmp_path, isolation="worktree")
+    worker_spec = spec(tmp_path, definition=definition)
+
+    await executor.run(worker_spec, WorkerUsageCollector())
+    workspace = executor.workspace_snapshot(worker_spec.task_id)
+
+    assert workspace is not None
+    assert workspace.preserved is False
+    assert workspace.reason is None
+    assert not Path(workspace.path).exists()
+    assert manager.list_records() == ()
+    await manager.close()
 
 
 async def test_fork_executor_copies_only_complete_parent_prefix(

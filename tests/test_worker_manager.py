@@ -12,6 +12,7 @@ from mewcode_agent.workers import (
     WorkerExecutionSpec,
     WorkerManager,
     WorkerRuntimeConfig,
+    WorkerWorkspaceSnapshot,
 )
 
 
@@ -112,6 +113,42 @@ async def test_explicit_background_truncates_notification_only() -> None:
     assert snapshot.result == result
     assert len(notification.result) <= 8000
     assert "[worker result truncated]" in notification.result
+    await manager.close()
+
+
+async def test_workspace_state_flows_to_snapshot_and_notification() -> None:
+    workspace = WorkerWorkspaceSnapshot(
+        str(Path.cwd().resolve()),
+        True,
+        "worktree_dirty",
+    )
+
+    async def runner(_spec, _usage):
+        return WorkerExecutionOutcome("done", True)
+
+    manager = WorkerManager(
+        WorkerRuntimeConfig(),
+        runner,
+        workspace_provider=lambda _task_id: workspace,
+    )
+    await manager.start(
+        spec("9" * 32),
+        background=True,
+        transition="explicit",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    snapshot = await manager.get("9" * 32)
+    notification = (await manager.take_notifications("session-a"))[0]
+
+    assert snapshot.workspace == workspace
+    assert notification.workspace == workspace
+    assert notification.to_dict()["workspace"] == {
+        "path": workspace.path,
+        "preserved": True,
+        "reason": "worktree_dirty",
+    }
     await manager.close()
 
 

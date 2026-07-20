@@ -73,11 +73,6 @@ class HookSubagentLauncher:
                     "worker_type_not_found",
                     "general Worker type 不存在",
                 )
-            if definition.isolation == "worktree":
-                raise WorkerError(
-                    "worker_isolation_unavailable",
-                    "worktree 隔离将在 Chapter 12 接入",
-                )
             worker_type = definition.name
             provider_id = (
                 self._parent_provider_id

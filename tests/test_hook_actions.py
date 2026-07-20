@@ -202,3 +202,40 @@ async def test_cancelled_shell_is_terminated_and_reaped(
     await runner.close()
 
     assert process.terminated is True
+
+
+async def test_shell_project_root_binding_sets_cwd_and_resets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class FinishedProcess:
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    default = (tmp_path / "default").resolve()
+    bound = (tmp_path / "bound").resolve()
+    default.mkdir()
+    bound.mkdir()
+    observed: list[Path] = []
+
+    async def create_process(*_args, **kwargs):
+        observed.append(kwargs["cwd"])
+        return FinishedProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    runner = HookActionRunner(
+        project_root=default,
+        prompt_sink=RecordingPromptSink(),
+    )
+    action = runner.prepare(ShellHookAction("ok"), {})
+
+    with runner.bind_project_root(bound):
+        assert runner.project_root == bound
+        await runner.execute(action, event_sequence=1, rule_id="bound")
+    assert runner.project_root == default
+    await runner.execute(action, event_sequence=2, rule_id="default")
+    await runner.close()
+
+    assert observed == [bound, default]

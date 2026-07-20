@@ -89,12 +89,14 @@ class PromptRuntime:
         self,
         *,
         session_controls: tuple[RuntimeInstruction, ...] = (),
+        session_environment: SessionEnvironment | None = None,
+        request_environment_collector: RequestEnvironmentCollector | None = None,
     ) -> PromptRuntime:
         """Create an independent timeline over the same environment sources."""
 
         return PromptRuntime(
-            self._session_environment,
-            self._collector,
+            session_environment or self._session_environment,
+            request_environment_collector or self._collector,
             session_controls=session_controls,
         )
 
@@ -118,12 +120,16 @@ class PromptRuntime:
         self,
         *,
         extra_controls: tuple[RuntimeInstruction, ...] = (),
+        session_environment: SessionEnvironment | None = None,
+        request_environment_collector: RequestEnvironmentCollector | None = None,
     ) -> PromptRuntime:
         """Fork with the current effective session controls copied exactly."""
 
         self._validate_session_controls(extra_controls)
         return self.fork(
-            session_controls=(*self.current_session_controls(), *extra_controls)
+            session_controls=(*self.current_session_controls(), *extra_controls),
+            session_environment=session_environment,
+            request_environment_collector=request_environment_collector,
         )
 
     def replace_dynamic_session_controls(

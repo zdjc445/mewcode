@@ -177,6 +177,16 @@ class WorkerCommandManager:
             ),
             f"error_code: {snapshot.error_code or 'null'}",
             (
+                "workspace: null"
+                if snapshot.workspace is None
+                else (
+                    "workspace: "
+                    f"path={snapshot.workspace.path}, "
+                    f"preserved={snapshot.workspace.preserved}, "
+                    f"reason={snapshot.workspace.reason or 'null'}"
+                )
+            ),
+            (
                 "report_format_valid: "
                 + (
                     "null"

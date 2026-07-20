@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -95,12 +98,36 @@ class HookActionRunner:
         if not isinstance(project_root, Path) or not project_root.is_absolute():
             raise ValueError("project_root 必须是绝对 Path")
         self._project_root = project_root
+        self._project_root_binding: ContextVar[Path | None] = ContextVar(
+            f"mewcode_hook_action_root_{id(self)}",
+            default=None,
+        )
         self._prompt_sink = prompt_sink
         self._http_client = http_client or httpx.AsyncClient(
             follow_redirects=False
         )
         self._subagent_runner = subagent_runner
         self._closed = False
+
+    @property
+    def project_root(self) -> Path:
+        return self._project_root_binding.get() or self._project_root
+
+    @contextmanager
+    def bind_project_root(self, path: Path) -> Iterator[Path]:
+        if not isinstance(path, Path) or not path.is_absolute():
+            raise ValueError("project_root binding 必须是绝对 Path")
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("无法解析 project_root binding") from exc
+        if not resolved.is_dir():
+            raise ValueError("project_root binding 不是目录")
+        token = self._project_root_binding.set(resolved)
+        try:
+            yield resolved
+        finally:
+            self._project_root_binding.reset(token)
 
     def set_subagent_runner(self, runner: HookSubagentRunner) -> None:
         if not callable(runner):
@@ -245,7 +272,7 @@ class HookActionRunner:
             process = await asyncio.create_subprocess_exec(
                 executable,
                 *arguments,
-                cwd=self._project_root,
+                cwd=self.project_root,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )

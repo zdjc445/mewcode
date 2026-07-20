@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from contextlib import ExitStack, nullcontext
 from contextvars import ContextVar
 from hashlib import sha256
+from pathlib import Path
 import re
 
 from mewcode_agent.agent.context import AgentRunContext
@@ -20,6 +22,7 @@ from mewcode_agent.agent.tool_scheduler import ToolScheduler
 from mewcode_agent.compaction import ContextWindowManager, history_atomic_boundaries
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.hooks import HookEngine, HookToolExecutionInterceptor, PromptHookBridge
+from mewcode_agent.hooks import HookActionRunner
 from mewcode_agent.models import ChatMessage
 from mewcode_agent.prompting.composer import PromptComposer
 from mewcode_agent.prompting.models import RuntimeInstruction
@@ -36,8 +39,16 @@ from mewcode_agent.workers.models import (
     WorkerPermissionMode,
     WorkerRoleDefinition,
     WorkerRuntimeConfig,
+    WorkerWorkspaceSnapshot,
 )
 from mewcode_agent.workers.usage import WorkerUsageCollector
+from mewcode_agent.worktrees import (
+    WorktreeError,
+    WorktreeManager,
+    bind_worktree_runtime,
+    fork_worktree_prompt_runtime,
+    worktree_worker_control,
+)
 
 
 ProviderResolver = Callable[[str], LLMProvider]
@@ -177,9 +188,11 @@ class WorkerExecutor:
         policy_engine_factory: PolicyEngineFactory,
         context_manager_factory: ContextManagerFactory,
         hook_engine: HookEngine | None = None,
+        hook_action_runner: HookActionRunner | None = None,
         prompt_hook_bridge: PromptHookBridge | None = None,
         skill_runtime: SkillRuntime | None = None,
         load_skill_tool: LoadSkillTool | None = None,
+        worktree_manager: WorktreeManager | None = None,
     ) -> None:
         if (skill_runtime is None) != (load_skill_tool is None):
             raise ValueError(
@@ -192,10 +205,19 @@ class WorkerExecutor:
         self._policy_engine_factory = policy_engine_factory
         self._context_manager_factory = context_manager_factory
         self._hook_engine = hook_engine
+        self._hook_action_runner = hook_action_runner
         self._prompt_hook_bridge = prompt_hook_bridge
         self._skill_runtime = skill_runtime
         self._load_skill_tool = load_skill_tool
+        self._worktree_manager = worktree_manager
         self._contexts: dict[str, AgentRunContext] = {}
+        self._workspaces: dict[str, WorkerWorkspaceSnapshot] = {}
+
+    def workspace_snapshot(
+        self,
+        task_id: str,
+    ) -> WorkerWorkspaceSnapshot | None:
+        return self._workspaces.get(task_id)
 
     def cancel(self, task_id: str) -> bool:
         context = self._contexts.get(task_id)
@@ -211,10 +233,111 @@ class WorkerExecutor:
     ) -> WorkerExecutionOutcome:
         provider = self._provider_resolver(spec.provider_id)
         definition = spec.definition
-        controls = () if definition is None else (_role_control(definition, spec.task),)
-        runtime = self._parent_prompt_runtime.fork_current_session(
-            extra_controls=controls
+        workspace_root = await self._prepare_workspace(spec, definition)
+        try:
+            return await self._run_agent(
+                spec,
+                usage,
+                provider,
+                definition,
+                workspace_root,
+            )
+        finally:
+            if workspace_root is not None:
+                await self._finish_workspace(spec.task_id, workspace_root)
+
+    async def _prepare_workspace(
+        self,
+        spec: WorkerExecutionSpec,
+        definition: WorkerRoleDefinition | None,
+    ) -> Path | None:
+        if definition is None or definition.isolation != "worktree":
+            return None
+        if self._worktree_manager is None:
+            raise WorkerError(
+                "worktree_repository_unavailable",
+                "Worktree manager 不可用",
+            )
+        if self._registry.security_boundary is None:
+            raise WorkerError(
+                "worker_failed",
+                "Worktree Worker 缺少路径安全边界",
+            )
+        if self._hook_engine is not None and self._hook_action_runner is None:
+            raise WorkerError(
+                "worker_failed",
+                "Worktree Worker 缺少 Hook action binding",
+            )
+        owner_claimed = False
+        try:
+            await self._worktree_manager.claim_owner(spec.task_id)
+            owner_claimed = True
+            created = await self._worktree_manager.create(
+                f"worker/{spec.task_id}",
+                kind="worker",
+                owner_id=spec.task_id,
+            )
+        except WorktreeError as exc:
+            if owner_claimed:
+                await self._worktree_manager.release_owner(spec.task_id)
+            raise WorkerError(exc.code, "Worker worktree 创建失败") from exc
+        except asyncio.CancelledError:
+            if owner_claimed:
+                await self._worktree_manager.release_owner(spec.task_id)
+            raise
+        except Exception as exc:
+            if owner_claimed:
+                await self._worktree_manager.release_owner(spec.task_id)
+            raise WorkerError(
+                "worker_failed",
+                "Worker worktree 创建失败",
+            ) from exc
+        root = created.record.path
+        self._workspaces[spec.task_id] = WorkerWorkspaceSnapshot(
+            str(root),
+            None,
+            None,
         )
+        return root
+
+    async def _run_agent(
+        self,
+        spec: WorkerExecutionSpec,
+        usage: WorkerUsageCollector,
+        provider: LLMProvider,
+        definition: WorkerRoleDefinition | None,
+        workspace_root: Path | None,
+    ) -> WorkerExecutionOutcome:
+        controls = () if definition is None else (_role_control(definition, spec.task),)
+        if workspace_root is not None:
+            if self._worktree_manager is None:
+                raise WorkerError(
+                    "worktree_repository_unavailable",
+                    "Worktree manager 不可用",
+                )
+            main_root = self._worktree_manager.main_root
+            if main_root is None:
+                raise WorkerError(
+                    "worktree_repository_unavailable",
+                    "Worktree main root 不可用",
+                )
+            controls = (
+                worktree_worker_control(
+                    task_id=spec.task_id,
+                    main_root=main_root,
+                    worktree_root=workspace_root,
+                ),
+                *controls,
+            )
+            runtime = fork_worktree_prompt_runtime(
+                self._parent_prompt_runtime,
+                worktree_root=workspace_root,
+                extra_controls=controls,
+            )
+        else:
+            runtime = self._parent_prompt_runtime.fork_current_session(
+                extra_controls=controls
+            )
         history = ConversationHistory()
         if spec.parent_history:
             history.restore(fork_history_prefix(spec.parent_history))
@@ -263,6 +386,21 @@ class WorkerExecutor:
                 worker_token = _WORKER_EXECUTION_ACTIVE.set(True)
                 stack.callback(_WORKER_EXECUTION_ACTIVE.reset, worker_token)
                 stack.enter_context(cache_binding)
+                if workspace_root is not None:
+                    boundary = self._registry.security_boundary
+                    if boundary is None:
+                        raise WorkerError(
+                            "worker_failed",
+                            "Worktree Worker 缺少路径安全边界",
+                        )
+                    stack.enter_context(
+                        bind_worktree_runtime(
+                            workspace_root,
+                            path_sandbox=boundary.path_sandbox,
+                            hook_action_runner=self._hook_action_runner,
+                            hook_engine=self._hook_engine,
+                        )
+                    )
                 if self._prompt_hook_bridge is not None:
                     stack.enter_context(
                         self._prompt_hook_bridge.bind_runtime(
@@ -307,4 +445,53 @@ class WorkerExecutor:
         return WorkerExecutionOutcome(
             final,
             fork_report_format_valid(final) if definition is None else True,
+        )
+
+    async def _finish_workspace(self, task_id: str, path: Path) -> None:
+        if self._worktree_manager is None:
+            self._workspaces[task_id] = WorkerWorkspaceSnapshot(
+                str(path),
+                True,
+                "worktree_repository_unavailable",
+            )
+            return
+        reason: str | None = None
+        try:
+            if self._hook_engine is not None:
+                await self._hook_engine.drain_project_root(path)
+        except (OSError, RuntimeError, ValueError):
+            reason = "worktree_status_failed"
+        finally:
+            await self._worktree_manager.release_owner(task_id)
+        if reason is not None:
+            self._workspaces[task_id] = WorkerWorkspaceSnapshot(
+                str(path),
+                True,
+                reason,
+            )
+            return
+        try:
+            status = await self._worktree_manager.status(f"worker/{task_id}")
+            if status.deletion_safe:
+                await self._worktree_manager.delete(f"worker/{task_id}")
+                self._workspaces[task_id] = WorkerWorkspaceSnapshot(
+                    str(path),
+                    False,
+                    None,
+                )
+                return
+            if status.reason_code is not None:
+                reason = status.reason_code
+            elif status.dirty:
+                reason = "worktree_dirty"
+            elif status.has_unpushed:
+                reason = "worktree_unpushed"
+            else:
+                reason = "worktree_delete_unsafe"
+        except WorktreeError as exc:
+            reason = exc.code
+        self._workspaces[task_id] = WorkerWorkspaceSnapshot(
+            str(path),
+            True,
+            reason,
         )

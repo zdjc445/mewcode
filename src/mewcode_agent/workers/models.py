@@ -318,6 +318,35 @@ class WorkerExecutionOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerWorkspaceSnapshot:
+    path: str
+    preserved: bool | None
+    reason: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.path, str)
+            or not self.path
+            or not Path(self.path).is_absolute()
+        ):
+            raise ValueError("workspace path 必须是绝对路径字符串")
+        if self.preserved is not None and type(self.preserved) is not bool:
+            raise ValueError("workspace preserved 必须是 bool 或 null")
+        if self.preserved is True:
+            if not isinstance(self.reason, str) or not self.reason:
+                raise ValueError("保留 workspace 必须包含 reason")
+        elif self.reason is not None:
+            raise ValueError("未保留 workspace 不能包含 reason")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "preserved": self.preserved,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerTaskSnapshot:
     task_id: str
     session_id: str
@@ -337,6 +366,7 @@ class WorkerTaskSnapshot:
     result: str | None
     error_code: str | None
     report_format_valid: bool | None
+    workspace: WorkerWorkspaceSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +377,7 @@ class WorkerNotification:
     usage: WorkerUsageSnapshot
     result: str
     error_code: str | None
+    workspace: WorkerWorkspaceSnapshot | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -357,6 +388,9 @@ class WorkerNotification:
             "usage": self.usage.to_dict(),
             "result": self.result,
             "error_code": self.error_code,
+            "workspace": (
+                None if self.workspace is None else self.workspace.to_dict()
+            ),
         }
 
 
