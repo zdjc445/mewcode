@@ -30,6 +30,7 @@ import mewcode_agent.app as app_module
 from mewcode_agent.app import ChatApp
 from mewcode_agent.commands import (
     BuiltinCommandServices,
+    CommandError,
     PermissionCommandPaths,
     build_builtin_command_registry,
 )
@@ -369,6 +370,26 @@ def make_session_app(
         notes_manager=notes,  # type: ignore[arg-type]
     )
     return app, manager, history, activations
+
+
+def test_workspace_restart_records_exact_target_and_rejects_active_agent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    app = make_app(ErrorAgentLoop())
+    target = (tmp_path / "target").resolve()
+    target.mkdir()
+    exits: list[bool] = []
+    monkeypatch.setattr(app, "exit", lambda: exits.append(True))
+
+    app.request_workspace_restart(target)
+
+    assert app.restart_target == target
+    assert exits == [True]
+    app._active_context = AgentRunContext()
+    with pytest.raises(CommandError) as caught:
+        app.request_workspace_restart(target)
+    assert caught.value.code == "command_unavailable"
 
 
 def make_builtin_app(

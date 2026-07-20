@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mewcode-agent = "mewcode_agent.cli:main"
+mewcode-agent = "mewcode_agent.cli:console_main"
 
 [build-system]
 requires = ["uv_build>=0.11.14,<0.12.0"]

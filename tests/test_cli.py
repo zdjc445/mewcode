@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -13,6 +15,115 @@ from mewcode_agent.notes import NotesSnapshot, note_paths, write_note_scope
 from mewcode_agent.prompting.environment import PromptEnvironmentError
 from mewcode_agent.sessions import SessionJournal
 from mewcode_agent.tools.registry import ToolRegistry
+from mewcode_agent.worktrees import WorktreeManager, WorktreeRuntimeConfig
+
+
+def test_cli_only_accepts_exact_optional_resume(monkeypatch, capsys) -> None:
+    calls: list[bool] = []
+
+    async def run_application(*, resume: bool = False) -> int:
+        calls.append(resume)
+        return 0
+
+    monkeypatch.setattr(cli, "run_application", run_application)
+
+    assert cli.main(("--resume",)) == 0
+    assert calls == [True]
+    assert cli.main(("--unknown",)) == 2
+    assert "mewcode-agent [--resume]" in capsys.readouterr().err
+
+
+async def test_run_application_rebuilds_after_workspace_restart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    first = (tmp_path / "first").resolve()
+    second = (tmp_path / "second").resolve()
+    first.mkdir()
+    second.mkdir()
+    calls: list[Path] = []
+
+    async def run_once(path: Path) -> tuple[int, Path | None]:
+        calls.append(path)
+        return (0, second) if path == first else (0, None)
+
+    monkeypatch.setattr(cli, "_run_application_once", run_once)
+
+    assert await cli.run_application(startup_directory=first) == 0
+    assert calls == [first, second]
+
+
+def _git_repository(tmp_path: Path) -> Path:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git executable is unavailable")
+    root = (tmp_path / "resume-repo").resolve()
+    root.mkdir()
+
+    def run(*arguments: str) -> None:
+        subprocess.run(
+            [executable, "-C", str(root), *arguments],
+            check=True,
+            capture_output=True,
+        )
+
+    run("init")
+    run("config", "user.name", "MewCode Tests")
+    run("config", "user.email", "tests@example.invalid")
+    (root / "tracked.txt").write_text("base\n", encoding="utf-8")
+    run("add", "tracked.txt")
+    run("commit", "-m", "base")
+    return root
+
+
+async def test_run_application_resume_uses_persisted_active_worktree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = _git_repository(tmp_path)
+    config = WorktreeRuntimeConfig(local_config_files=())
+    manager = await WorktreeManager.open(root, config)
+    created = await manager.create("feature/resume")
+    await manager.activate("feature/resume")
+    await manager.close()
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    calls: list[Path] = []
+
+    async def run_once(path: Path) -> tuple[int, Path | None]:
+        calls.append(path)
+        return 0, None
+
+    monkeypatch.setattr(cli, "_run_application_once", run_once)
+
+    assert await cli.run_application(
+        resume=True,
+        startup_directory=root,
+    ) == 0
+    assert calls == [created.record.path]
+
+    manager = await WorktreeManager.open(root, config)
+    await manager.deactivate()
+    await manager.delete("feature/resume")
+    await manager.close()
+
+
+async def test_run_application_resume_rejects_invalid_state(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    root = _git_repository(tmp_path)
+    state_path = root / ".git" / "mewcode-agent" / "worktrees.json"
+    state_path.parent.mkdir()
+    state_path.write_text("{invalid", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    assert await cli.run_application(
+        resume=True,
+        startup_directory=root,
+    ) == 1
+    assert "worktree" in capsys.readouterr().err.lower()
 
 
 def test_cli_returns_one_when_config_is_missing(
@@ -107,6 +218,8 @@ def test_cli_builds_and_runs_app_with_valid_config(
         "skills",
         "workers",
         "worker",
+        "worktrees",
+        "worktree",
         "commit",
         "review",
         "test",
@@ -606,7 +719,7 @@ def test_cli_reports_prompt_environment_error(
     monkeypatch.setattr(
         cli,
         "collect_session_environment",
-        lambda: (_ for _ in ()).throw(
+        lambda **_kwargs: (_ for _ in ()).throw(
             PromptEnvironmentError("cwd error")
         ),
     )

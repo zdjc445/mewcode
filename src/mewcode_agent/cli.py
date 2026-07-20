@@ -104,6 +104,8 @@ from mewcode_agent.workers import (
 )
 from mewcode_agent.worktrees import (
     WorktreeConfigError,
+    WorktreeCommandManager,
+    WorktreeError,
     WorktreeManager,
     load_worktree_config,
 )
@@ -171,8 +173,10 @@ def _print_worker_diagnostic(diagnostic: WorkerDiagnostic) -> None:
     )
 
 
-async def run_application() -> int:
-    """Build and run one application session on the current event loop."""
+async def _run_application_once(
+    working_directory: Path,
+) -> tuple[int, Path | None]:
+    """Build, run, and fully close one workspace-scoped application."""
 
     mcp_manager: McpConnectionManager | None = None
     artifact_store: ContextArtifactStore | None = None
@@ -185,7 +189,9 @@ async def run_application() -> int:
     worker_manager: WorkerManager | None = None
     worktree_manager: WorktreeManager | None = None
     try:
-        session_environment = collect_session_environment()
+        session_environment = collect_session_environment(
+            working_directory=working_directory
+        )
         working_directory = Path(
             session_environment.working_directory
         )
@@ -302,7 +308,14 @@ async def run_application() -> int:
         )
         await mcp_manager.activate_all()
         reserved_command_names = frozenset(
-            (*BUILTIN_COMMAND_KEYS, "skills", "workers", "worker")
+            (
+                *BUILTIN_COMMAND_KEYS,
+                "skills",
+                "workers",
+                "worker",
+                "worktrees",
+                "worktree",
+            )
         )
         builtin_skills = builtin_skill_root()
         skill_snapshot = scan_skill_catalog(
@@ -510,7 +523,7 @@ async def run_application() -> int:
                             if artifact_store is not None:
                                 await artifact_store.close()
         print(f"启动失败：{exc}", file=sys.stderr)
-        return 1
+        return 1, None
     try:
         assert hook_engine is not None
         assert hook_action_runner is not None
@@ -610,6 +623,9 @@ async def run_application() -> int:
             worker_catalog,
             worker_manager,
         )
+        worktree_command_manager = WorktreeCommandManager(
+            worktree_manager
+        )
 
         async def session_switched(
             previous: str,
@@ -642,6 +658,7 @@ async def run_application() -> int:
             extra_specs=(
                 skill_command_manager.management_spec(),
                 *worker_command_manager.specs(),
+                *worktree_command_manager.specs(),
             ),
         )
         skill_command_manager.bind_registry(command_registry)
@@ -661,7 +678,7 @@ async def run_application() -> int:
         await hook_lifecycle.start()
         hook_lifecycle_started = True
         await app.run_async()
-        return 0
+        return 0, app.restart_target
     finally:
         assert mcp_manager is not None
         assert artifact_store is not None
@@ -694,8 +711,51 @@ async def run_application() -> int:
                                 await artifact_store.close()
 
 
-def main() -> int:
+async def run_application(
+    *,
+    resume: bool = False,
+    startup_directory: Path | None = None,
+) -> int:
     try:
-        return asyncio.run(run_application())
+        current = (startup_directory or Path.cwd()).resolve(strict=True)
+        if not current.is_dir():
+            raise OSError("startup directory is not a directory")
+        if resume:
+            user_config_directory = Path.home() / ".mewcode-agent"
+            configuration = load_worktree_config(
+                user_config_directory / "worktrees.yaml"
+            )
+            resume_manager = await WorktreeManager.open(
+                current,
+                configuration,
+            )
+            try:
+                current = resume_manager.resume_target()
+            finally:
+                await resume_manager.close()
+    except OSError:
+        print("启动失败：无法解析当前工作目录", file=sys.stderr)
+        return 1
+    except (RuntimeError, WorktreeConfigError, WorktreeError) as exc:
+        print(f"启动失败：{exc}", file=sys.stderr)
+        return 1
+
+    while True:
+        code, restart_target = await _run_application_once(current)
+        if code != 0 or restart_target is None:
+            return code
+        current = restart_target
+
+
+def main(argv: tuple[str, ...] = ()) -> int:
+    if argv not in ((), ("--resume",)):
+        print("用法：mewcode-agent [--resume]", file=sys.stderr)
+        return 2
+    try:
+        return asyncio.run(run_application(resume=argv == ("--resume",)))
     except KeyboardInterrupt:
         return 130
+
+
+def console_main() -> int:
+    return main(tuple(sys.argv[1:]))

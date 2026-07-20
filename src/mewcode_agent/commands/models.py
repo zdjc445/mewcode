@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 import re
 from typing import Literal, Protocol, TypeAlias
 
@@ -131,6 +132,8 @@ class CommandUI(Protocol):
     def clear_transcript(self) -> None: ...
 
     def refresh_status(self, state: str) -> None: ...
+
+    def request_workspace_restart(self, target: Path) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

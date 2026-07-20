@@ -6,6 +6,7 @@ from mewcode_agent.worktrees.git import (
     GitRunner,
     read_linked_worktree_head,
 )
+from mewcode_agent.worktrees.commands import WorktreeCommandManager
 from mewcode_agent.worktrees.loader import load_worktree_config
 from mewcode_agent.worktrees.initializer import WorktreeInitializer
 from mewcode_agent.worktrees.manager import WorktreeManager
@@ -45,6 +46,7 @@ __all__ = [
     "GitRepositoryIdentity",
     "GitRunner",
     "WorktreeCloseResult",
+    "WorktreeCommandManager",
     "WorktreeConfigError",
     "WorktreeCreateResult",
     "WorktreeError",

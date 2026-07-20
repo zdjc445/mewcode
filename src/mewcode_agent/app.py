@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from textual import events, on, work
@@ -410,6 +411,11 @@ class ChatApp(App[None]):
         self._status_state = "就绪"
         self._active_context: AgentRunContext | None = None
         self._active_input_worker: Worker[None] | None = None
+        self._restart_target: Path | None = None
+
+    @property
+    def restart_target(self) -> Path | None:
+        return self._restart_target
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="chat-log", wrap=True, markup=False)
@@ -507,6 +513,20 @@ class ChatApp(App[None]):
 
     def refresh_status(self, state: str) -> None:
         self._set_status(state)
+
+    def request_workspace_restart(self, target: Path) -> None:
+        if self._active_context is not None:
+            raise CommandError("command_unavailable")
+        if not isinstance(target, Path) or not target.is_absolute():
+            raise ValueError("restart target 必须是绝对 Path")
+        try:
+            resolved = target.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise CommandError("command_unavailable") from exc
+        if not resolved.is_dir():
+            raise CommandError("command_unavailable")
+        self._restart_target = resolved
+        self.exit()
 
     @on(Switch.Changed, "#plan-only-switch")
     def update_default_mode(self, event: Switch.Changed) -> None:

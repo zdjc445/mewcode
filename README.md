@@ -346,9 +346,31 @@ background_allowed_tools:
 enable_verify_role: false
 ```
 
-Worker 使用独立历史、权限临时状态、文件已读缓存和 Token 统计；共享 Provider adapter、Hook 引擎与项目文件系统。前台等待超时或按 Escape 时，同一 Worker 实例转入后台，不会重启请求。后台终态在主 Agent 的下一次请求中作为 request control 注入，不写入普通历史、会话 JSONL、摘要或笔记。Worker 永远看不到 `spawn_worker`，后台工具还会与 `background_allowed_tools` 取交集。
+Worker 使用独立历史、权限临时状态、文件已读缓存和 Token 统计；共享 Provider adapter 与 Hook 引擎。`isolation: none` 使用当前项目文件系统，`isolation: worktree` 则为任务创建受管 Git linked worktree，并通过 ContextVar 同时收窄文件工具根目录、Hook `project.root`、Hook shell cwd 和 Prompt 的 Git/working-directory 环境。前台等待超时或按 Escape 时，同一 Worker 实例转入后台，不会重启请求。后台终态在主 Agent 的下一次请求中作为 request control 注入，不写入普通历史、会话 JSONL、摘要或笔记。Worker 永远看不到 `spawn_worker`，后台工具还会与 `background_allowed_tools` 取交集。
 
 `/workers` 列出任务，`/workers roles` 列出生效角色；`/worker show <task_id>` 显示完整脱敏记录，`/worker cancel <task_id>` 经确认后终止任务。完整角色 frontmatter、Fork 报告格式和状态机见 [`docs/ch11/spec.md`](docs/ch11/spec.md)。
+
+## Git Worktree 隔离
+
+受管目录固定为主 Git worktree 的 `.mewcode/.worktrees/`，状态固定写入 common Git dir 的 `mewcode-agent/worktrees.json`。名称最多四段，每段精确匹配 `[a-z][a-z0-9_-]{0,31}`；路径和分支只由规范名称计算，不接受任意目录或 branch。应用只把 `/.mewcode/.worktrees/` 加入 common Git `info/exclude`，不会修改 tracked `.gitignore`。
+
+用户配置只从 `Path.home() / ".mewcode-agent" / "worktrees.yaml"` 读取；不存在时使用以下内存默认值且不创建文件：
+
+```yaml
+version: 1
+stale_after_hours: 72
+cleanup_interval_seconds: 1800
+local_config_files:
+  - settings.local.json
+dependency_links: []
+copy_ignored: []
+```
+
+环境初始化依次复制本地配置、继承绝对 hooksPath、创建依赖目录符号链接并复制明确列出的 ignored 路径。单项失败只保存不含文件正文的稳定诊断；依赖链接失败不会退化为目录全量复制。配置路径非法则启动失败。
+
+普通删除和自动 Worker 收尾都会实时检查 dirty 与 unpushed。clean 且没有未推送提交时可删除；dirty、unpushed、branch 不匹配或 Git 检查失败时一律保留。周期清理只处理状态文件登记、已过期、未使用且安全的 Worker worktree，永不自动删除 manual worktree 或扫描到的未知目录。本功能不会自动 push、commit、merge、reset、clean 或丢弃修改。
+
+手动命令为 `/worktrees`、`/worktree create <name>`、`/worktree enter <name>`、`/worktree exit`、`/worktree status [name]`、`/worktree delete <name>` 和 `/worktree delete <name> --discard`。`--discard` 会显示 dirty/unpushed 摘要并要求破坏性确认。enter/exit 会正常退出当前 TUI、完整关闭 Worker/Worktree/Notes/Hook/Session/MCP/artifact runtime，再在同一 Python 进程中以目标目录重新 bootstrap；启动命令可加唯一可选参数 `--resume` 恢复状态中的 active worktree。完整契约见 [`docs/ch12/spec.md`](docs/ch12/spec.md)。
 
 ## 斜杠命令
 
@@ -362,6 +384,8 @@ Worker 使用独立历史、权限临时状态、文件已读缓存和 Token 统
 | `/skills [show <name>\|rescan]` | 无 | 查看 Skill、显示脱敏详情或原子重新扫描 |
 | `/workers [roles]` | 无 | 列出 Worker 任务或生效角色 |
 | `/worker <show\|cancel> <task_id>` | 无 | 显示或确认终止一个 Worker 任务 |
+| `/worktrees` | 无 | 列出受管 worktree 与实时安全状态 |
+| `/worktree <create\|enter\|exit\|status\|delete> ...` | 无 | 管理、切换或经保护删除 Git worktree |
 | `/commit [arguments]` | 无 | 加载内置或被覆盖的 shared 提交 Skill |
 | `/review [arguments]` | 无 | 加载内置或被覆盖的 isolated 代码审查 Skill |
 | `/test [arguments]` | 无 | 加载内置或被覆盖的 isolated 测试 Skill |
@@ -418,6 +442,7 @@ uv run python -m compileall -q src tests integration_tests
 - 支持集中式斜杠命令注册、别名冲突检查、大小写不敏感分发、帮助和 Tab 补全。
 - 支持项目、用户、内置三层 Skill，按需加载 SOP、最小工具白名单、shared/isolated 执行和动态命令。
 - 支持四层 Worker 角色、定义式/Fork 子工作者、前后台无损切换、独立状态与下一请求终态通知。
+- 支持受管 Git linked worktree、Worker ContextVar 目录隔离、手动 runtime rebuild、`--resume` 和 fail-closed 删除保护。
 - 支持目录 Skill 的严格 JSON Schema 与无 shell Python 子进程工具协议。
 - 支持两层声明式 Hook、生命周期事件、同步/异步动作、Prompt 注入、HTTP、shell 和工具拒绝拦截。
 - 支持本地状态和进程内权限模式覆盖。

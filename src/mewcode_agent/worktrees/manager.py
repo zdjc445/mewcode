@@ -164,6 +164,21 @@ class WorktreeManager:
     def active_name(self) -> str | None:
         return None if self._state is None else self._state.active_name
 
+    @property
+    def current_name(self) -> str | None:
+        if self._identity is None:
+            return None
+        state = self._load_state()
+        self._state = state
+        return next(
+            (
+                record.name
+                for record in state.records
+                if record.path == self._identity.main_root
+            ),
+            None,
+        )
+
     def _require_available(
         self,
     ) -> tuple[GitRunner, GitRepositoryIdentity, Path, Path, Path]:
@@ -699,7 +714,8 @@ class WorktreeManager:
                     common_git_dir=identity.common_git_dir,
                     expected_branch=record.branch,
                 )
-                if state.active_name == name:
+                already_running = identity.main_root == record.path
+                if state.active_name == name and already_running:
                     self._state = state
                     return WorktreeSwitchResult(record.path, name, False)
                 previous_used = datetime.fromisoformat(record.last_used_at)
@@ -718,20 +734,25 @@ class WorktreeManager:
                 new_state = WorktreeState(state.main_root, name, records)
                 write_worktree_state(state_path, new_state)
                 self._state = new_state
-                return WorktreeSwitchResult(record.path, name, True)
+                return WorktreeSwitchResult(
+                    record.path,
+                    name,
+                    not already_running,
+                )
 
     async def deactivate(self) -> WorktreeSwitchResult:
-        _, _, _, state_path, lock_path = self._require_available()
+        _, identity, _, state_path, lock_path = self._require_available()
         async with self._operation_lock:
             current = self._current_time()
             with worktree_state_lock(lock_path, now=lambda: current):
                 state = self._load_state()
+                already_main = identity.main_root == state.main_root
                 if state.active_name is None:
                     self._state = state
                     return WorktreeSwitchResult(
                         state.main_root,
                         None,
-                        False,
+                        not already_main,
                     )
                 new_state = WorktreeState(state.main_root, None, state.records)
                 write_worktree_state(state_path, new_state)
@@ -739,7 +760,7 @@ class WorktreeManager:
                 return WorktreeSwitchResult(
                     state.main_root,
                     None,
-                    True,
+                    not already_main,
                 )
 
     def resume_target(self) -> Path:

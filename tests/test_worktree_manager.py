@@ -275,10 +275,14 @@ async def test_activate_blocks_delete_and_deactivate_returns_main(
     created = await manager.create("feature/active")
 
     entered = await manager.activate("feature/active")
-    repeated = await manager.activate("feature/active")
 
     assert entered.target == created.record.path
     assert entered.restart_required is True
+    assert manager.resume_target() == created.record.path
+    await manager.close()
+
+    manager = await _manager(created.record.path)
+    repeated = await manager.activate("feature/active")
     assert repeated.restart_required is False
     assert manager.resume_target() == created.record.path
     with pytest.raises(WorktreeError) as caught:
@@ -289,7 +293,7 @@ async def test_activate_blocks_delete_and_deactivate_returns_main(
     repeated_exit = await manager.deactivate()
     assert exited.target == root
     assert exited.restart_required is True
-    assert repeated_exit.restart_required is False
+    assert repeated_exit.restart_required is True
     assert manager.resume_target() == root
     await manager.delete("feature/active")
     await manager.close()
