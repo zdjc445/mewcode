@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 from typing import Literal, TypeAlias
 
+from mewcode_agent.models import ChatMessage
+
 
 WorkerSource: TypeAlias = Literal["plugin", "builtin", "user", "project"]
 WorkerPermissionMode: TypeAlias = Literal[
@@ -17,6 +19,21 @@ WorkerPermissionMode: TypeAlias = Literal[
     "permissive",
 ]
 WorkerIsolation: TypeAlias = Literal["none", "worktree"]
+WorkerKind: TypeAlias = Literal["definition", "fork", "hook"]
+WorkerState: TypeAlias = Literal[
+    "starting",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+]
+WorkerMode: TypeAlias = Literal["foreground", "background"]
+WorkerTransition: TypeAlias = Literal[
+    "explicit",
+    "fork_forced",
+    "timeout",
+    "escape",
+]
 
 WORKER_NAME_PATTERN = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 WORKER_TOOL_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
@@ -203,3 +220,141 @@ class WorkerCatalogSnapshot:
             raise ValueError("diagnostics 无效")
         if not isinstance(self.runtime_config, WorkerRuntimeConfig):
             raise ValueError("runtime_config 无效")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerUsageSnapshot:
+    prompt_tokens: int = 0
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
+    completion_tokens: int = 0
+    unavailable_rounds: int = 0
+
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int or value < 0
+            for value in (
+                self.prompt_tokens,
+                self.cache_hit_tokens,
+                self.cache_miss_tokens,
+                self.completion_tokens,
+                self.unavailable_rounds,
+            )
+        ):
+            raise ValueError("Worker usage 字段必须是非负整数")
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "cache_hit_tokens": self.cache_hit_tokens,
+            "cache_miss_tokens": self.cache_miss_tokens,
+            "completion_tokens": self.completion_tokens,
+            "unavailable_rounds": self.unavailable_rounds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerExecutionSpec:
+    task_id: str
+    session_id: str
+    worker_type: str
+    kind: WorkerKind
+    task: str
+    definition: WorkerRoleDefinition | None
+    parent_history: tuple[ChatMessage, ...]
+    visible_tools: frozenset[str]
+    provider_id: str
+    model: str
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[0-9a-f]{32}", self.task_id) is None:
+            raise ValueError("task_id 必须是 32 位小写十六进制")
+        if not isinstance(self.session_id, str) or not self.session_id:
+            raise ValueError("session_id 必须是非空字符串")
+        if (
+            not isinstance(self.worker_type, str)
+            or (
+                self.worker_type != "fork"
+                and WORKER_NAME_PATTERN.fullmatch(self.worker_type) is None
+            )
+        ):
+            raise ValueError("worker_type 无效")
+        if self.kind not in ("definition", "fork", "hook"):
+            raise ValueError("kind 无效")
+        if (
+            not isinstance(self.task, str)
+            or not self.task.strip()
+            or len(self.task) > 32768
+        ):
+            raise ValueError("task 必须是 1..32768 code points 的字符串")
+        if self.kind == "definition" and self.definition is None:
+            raise ValueError("definition kind 必须携带角色定义")
+        if self.kind == "fork" and self.definition is not None:
+            raise ValueError("fork kind 不能携带角色定义")
+        if not isinstance(self.parent_history, tuple) or any(
+            not isinstance(item, ChatMessage) for item in self.parent_history
+        ):
+            raise ValueError("parent_history 无效")
+        if not isinstance(self.visible_tools, frozenset):
+            raise ValueError("visible_tools 必须是 frozenset")
+        if "spawn_worker" in self.visible_tools:
+            raise ValueError("visible_tools 不能包含 spawn_worker")
+        if not isinstance(self.provider_id, str) or not self.provider_id:
+            raise ValueError("provider_id 必须是非空字符串")
+        if not isinstance(self.model, str) or not self.model:
+            raise ValueError("model 必须是非空字符串")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerExecutionOutcome:
+    result: str
+    report_format_valid: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, str) or not self.result.strip():
+            raise ValueError("Worker result 必须是非空字符串")
+        if type(self.report_format_valid) is not bool:
+            raise ValueError("report_format_valid 必须是 bool")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerTaskSnapshot:
+    task_id: str
+    session_id: str
+    worker_type: str
+    kind: WorkerKind
+    state: WorkerState
+    mode: WorkerMode
+    transition: WorkerTransition | None
+    task: str
+    provider_id: str
+    model: str
+    visible_tools: tuple[str, ...]
+    created_at: str
+    started_at: str | None
+    ended_at: str | None
+    usage: WorkerUsageSnapshot
+    result: str | None
+    error_code: str | None
+    report_format_valid: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerNotification:
+    task_id: str
+    worker_type: str
+    status: Literal["completed", "failed", "cancelled"]
+    usage: WorkerUsageSnapshot
+    result: str
+    error_code: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "type": "worker_terminal",
+            "task_id": self.task_id,
+            "worker_type": self.worker_type,
+            "status": self.status,
+            "usage": self.usage.to_dict(),
+            "result": self.result,
+            "error_code": self.error_code,
+        }
