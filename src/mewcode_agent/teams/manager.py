@@ -19,6 +19,7 @@ from mewcode_agent.teams.models import (
     TeamDependencyResult,
     TeamError,
     TeamMailboxMessage,
+    TeamMainMergePreview,
     TeamMemberRecord,
     TeamPersistentState,
     TeamRecord,
@@ -38,7 +39,12 @@ from mewcode_agent.teams.storage import (
     write_team_state,
 )
 from mewcode_agent.workers import WorkerCatalog
-from mewcode_agent.worktrees import GitRunner, WorktreeError, WorktreeManager
+from mewcode_agent.worktrees import (
+    GitRunner,
+    WorktreeError,
+    WorktreeManager,
+    validate_object_id,
+)
 
 
 _TERMINAL_TASK_STATES = frozenset(
@@ -102,6 +108,7 @@ class TeamManager:
         catalog: WorkerCatalog,
         backend: TeamBackend,
         worktree_manager: WorktreeManager,
+        git: GitRunner | None,
         state: TeamPersistentState | None,
         state_path: Path | None,
         lock_path: Path | None,
@@ -114,6 +121,7 @@ class TeamManager:
         self._catalog = catalog
         self._backend = backend
         self._worktree_manager = worktree_manager
+        self._git = git
         self._state = state
         self._state_path = state_path
         self._lock_path = lock_path
@@ -169,6 +177,7 @@ class TeamManager:
                 catalog=catalog,
                 backend=backend,
                 worktree_manager=worktree_manager,
+                git=runner,
                 state=state,
                 state_path=state_path,
                 lock_path=lock_path,
@@ -192,6 +201,7 @@ class TeamManager:
             catalog=catalog,
             backend=backend,
             worktree_manager=worktree_manager,
+            git=None,
             state=None,
             state_path=None,
             lock_path=None,
@@ -1319,6 +1329,394 @@ class TeamManager:
                 else:
                     self._state = state
                 return tuple(controls)
+
+    def _require_git(self) -> GitRunner:
+        self._require_available()
+        if self._git is None:
+            raise TeamError(
+                "team_repository_unavailable",
+                "Team Git runner 不可用",
+            )
+        return self._git
+
+    def _worktree_record(self, name: str):
+        try:
+            record = next(
+                (
+                    item
+                    for item in self._worktree_manager.list_records()
+                    if item.name == name
+                ),
+                None,
+            )
+        except WorktreeError as exc:
+            raise TeamError(
+                "team_integration_unsafe",
+                "无法读取 Team worktree 记录",
+            ) from exc
+        if record is None:
+            raise TeamError(
+                "team_integration_unsafe",
+                "Team worktree 记录不存在",
+            )
+        return record
+
+    async def _git_head(self, path: Path) -> str:
+        git = self._require_git()
+        try:
+            result = await git.run(
+                path,
+                "rev-parse",
+                "HEAD",
+                error_code="team_integration_unsafe",
+            )
+            return validate_object_id(result.stdout)
+        except (WorktreeError, ValueError) as exc:
+            raise TeamError(
+                "team_integration_unsafe",
+                "无法验证 Team Git HEAD",
+            ) from exc
+
+    async def _main_dirty(self, path: Path) -> bool:
+        git = self._require_git()
+        try:
+            result = await git.run(
+                path,
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=normal",
+                error_code="team_integration_unsafe",
+            )
+            return bool(result.stdout)
+        except WorktreeError as exc:
+            raise TeamError(
+                "team_integration_unsafe",
+                "无法验证主工作树状态",
+            ) from exc
+
+    async def _abort_merge(self, path: Path) -> None:
+        git = self._require_git()
+        try:
+            await git.run(
+                path,
+                "merge",
+                "--abort",
+                check=False,
+                error_code="team_merge_failed",
+            )
+        except WorktreeError:
+            pass
+
+    async def integrate_task(self, task_id: str) -> TeamTaskRecord:
+        self._require_accepting()
+        try:
+            validate_team_hex_id(task_id, "task_id")
+        except ValueError as exc:
+            raise TeamError("team_task_invalid", "Task ID 无效") from exc
+        async with self._operation_lock:
+            _, lock_path, _, _ = self._require_available()
+            git = self._require_git()
+            current = self._current_time()
+            with team_state_lock(lock_path, now=lambda: current):
+                state = self._load_state()
+                team = self._active_team(state)
+                task = next(
+                    (item for item in team.tasks if item.task_id == task_id),
+                    None,
+                )
+                if task is None:
+                    raise TeamError("team_task_not_found", "Team task 不存在")
+                if task.status == "integrated":
+                    self._state = state
+                    return task
+                if task.status != "completed":
+                    raise TeamError(
+                        "team_task_terminal",
+                        "只有 completed task 可以集成",
+                    )
+                worker_name = f"worker/{task.task_id}"
+                worker_record = self._worktree_record(worker_name)
+                integration_record = self._worktree_record(
+                    team.integration_worktree_name
+                )
+                if (
+                    worker_record.kind != "worker"
+                    or worker_record.owner_id != task.task_id
+                    or task.workspace_path != worker_record.path
+                    or task.branch != worker_record.branch
+                    or task.head is None
+                    or task.head == team.base_head
+                ):
+                    raise TeamError(
+                        "team_integration_unsafe",
+                        "Task worktree 持久状态不匹配",
+                    )
+                try:
+                    worker_status = await self._worktree_manager.status(worker_name)
+                    integration_status = await self._worktree_manager.status(
+                        team.integration_worktree_name
+                    )
+                except WorktreeError as exc:
+                    raise TeamError(
+                        "team_integration_unsafe",
+                        "无法读取 Team worktree 状态",
+                    ) from exc
+                if (
+                    not worker_status.exists
+                    or worker_status.reason_code is not None
+                    or worker_status.dirty
+                    or worker_status.head != task.head
+                    or not integration_status.exists
+                    or integration_status.reason_code is not None
+                    or integration_status.dirty
+                ):
+                    raise TeamError(
+                        "team_integration_unsafe",
+                        "Task 或 integration worktree 状态不安全",
+                    )
+                try:
+                    merged = await git.run(
+                        integration_record.path,
+                        "merge",
+                        "--no-ff",
+                        "--no-edit",
+                        worker_record.branch,
+                        check=False,
+                        error_code="team_merge_failed",
+                    )
+                except WorktreeError as exc:
+                    raise TeamError(
+                        "team_merge_failed",
+                        "Team task merge 执行失败",
+                    ) from exc
+                if merged.returncode != 0:
+                    await self._abort_merge(integration_record.path)
+                    raise TeamError(
+                        "team_merge_conflict",
+                        "Team task merge 发生冲突",
+                    )
+                integrated_head = await self._git_head(integration_record.path)
+                integrated_task = replace(
+                    task,
+                    status="integrated",
+                    updated_at=current.isoformat(),
+                    integrated_head=integrated_head,
+                )
+                updated_team = replace(
+                    team,
+                    updated_at=current.isoformat(),
+                    tasks=tuple(
+                        integrated_task if item.task_id == task_id else item
+                        for item in team.tasks
+                    ),
+                    merged_task_ids=tuple(
+                        sorted((*team.merged_task_ids, task_id))
+                    ),
+                )
+                append_mailbox_message(
+                    self._mailbox_path(team.team_id, "lead"),
+                    TeamMailboxMessage(
+                        self._new_hex_id("message_id"),
+                        team.team_id,
+                        "system",
+                        "lead",
+                        "system",
+                        current.isoformat(),
+                        (
+                            f"task_id={task.task_id}; status=integrated; "
+                            f"integration_head={integrated_head}"
+                        ),
+                    ),
+                )
+                self._write_state(self._replace_team(state, updated_team))
+                return integrated_task
+
+    @staticmethod
+    def _validate_main_merge_tasks(team: TeamRecord) -> None:
+        prohibited = {
+            "blocked",
+            "pending",
+            "running",
+            "completed",
+            "failed",
+        }
+        if any(task.status in prohibited for task in team.tasks):
+            raise TeamError(
+                "team_integration_unsafe",
+                "Team tasks 尚未全部完成并集成",
+            )
+
+    async def _main_merge_preview(
+        self,
+        state: TeamPersistentState,
+        team: TeamRecord,
+    ) -> TeamMainMergePreview:
+        self._validate_main_merge_tasks(team)
+        integration = self._worktree_record(team.integration_worktree_name)
+        if integration.kind != "manual" or integration.owner_id is not None:
+            raise TeamError(
+                "team_integration_unsafe",
+                "Integration worktree 记录无效",
+            )
+        try:
+            integration_status = await self._worktree_manager.status(
+                team.integration_worktree_name
+            )
+        except WorktreeError as exc:
+            raise TeamError(
+                "team_integration_unsafe",
+                "无法读取 integration worktree 状态",
+            ) from exc
+        if (
+            not integration_status.exists
+            or integration_status.reason_code is not None
+            or integration_status.head is None
+        ):
+            raise TeamError(
+                "team_integration_unsafe",
+                "Integration worktree 状态不可验证",
+            )
+        main_head = await self._git_head(state.main_root)
+        main_dirty = await self._main_dirty(state.main_root)
+        counts = tuple(
+            sorted(
+                (
+                    status,
+                    sum(task.status == status for task in team.tasks),
+                )
+                for status in {
+                    "blocked",
+                    "pending",
+                    "running",
+                    "completed",
+                    "integrated",
+                    "failed",
+                    "cancelled",
+                }
+            )
+        )
+        return TeamMainMergePreview(
+            team.team_id,
+            team.name,
+            state.main_root,
+            integration.path,
+            main_head,
+            integration_status.head,
+            counts,  # type: ignore[arg-type]
+            main_dirty,
+            integration_status.dirty,
+        )
+
+    async def preview_main_merge(self) -> TeamMainMergePreview:
+        self._require_accepting()
+        async with self._operation_lock:
+            _, lock_path, _, _ = self._require_available()
+            current = self._current_time()
+            with team_state_lock(lock_path, now=lambda: current):
+                state = self._load_state()
+                team = self._active_team(state)
+                preview = await self._main_merge_preview(state, team)
+                self._state = state
+                return preview
+
+    async def merge_into_main(
+        self,
+        preview: TeamMainMergePreview,
+    ) -> TeamRecord:
+        self._require_accepting()
+        if not isinstance(preview, TeamMainMergePreview):
+            raise ValueError("preview 类型无效")
+        async with self._operation_lock:
+            _, lock_path, _, _ = self._require_available()
+            git = self._require_git()
+            current = self._current_time()
+            with team_state_lock(lock_path, now=lambda: current):
+                state = self._load_state()
+                team = self._active_team(state)
+                current_preview = await self._main_merge_preview(state, team)
+                if (
+                    current_preview.team_id != preview.team_id
+                    or current_preview.main_path != preview.main_path
+                    or current_preview.integration_path != preview.integration_path
+                    or current_preview.main_head != preview.main_head
+                ):
+                    raise TeamError("team_main_changed", "主工作树已变化")
+                if current_preview.integration_head != preview.integration_head:
+                    raise TeamError(
+                        "team_merge_failed",
+                        "Integration HEAD 已变化",
+                    )
+                if current_preview.main_dirty or current_preview.integration_dirty:
+                    raise TeamError(
+                        "team_integration_unsafe",
+                        "主工作树或 integration worktree 不干净",
+                    )
+                integration = self._worktree_record(
+                    team.integration_worktree_name
+                )
+                try:
+                    absorbed = await git.run(
+                        integration.path,
+                        "merge",
+                        "--no-edit",
+                        preview.main_head,
+                        check=False,
+                        error_code="team_merge_failed",
+                    )
+                except WorktreeError as exc:
+                    raise TeamError(
+                        "team_merge_failed",
+                        "Integration 合并 main 失败",
+                    ) from exc
+                if absorbed.returncode != 0:
+                    await self._abort_merge(integration.path)
+                    raise TeamError(
+                        "team_merge_conflict",
+                        "Integration 合并 main 发生冲突",
+                    )
+                integration_head = await self._git_head(integration.path)
+                if await self._git_head(state.main_root) != preview.main_head:
+                    raise TeamError("team_main_changed", "主工作树 HEAD 已变化")
+                try:
+                    fast_forward = await git.run(
+                        state.main_root,
+                        "merge",
+                        "--ff-only",
+                        integration.branch,
+                        check=False,
+                        error_code="team_merge_failed",
+                    )
+                except WorktreeError as exc:
+                    raise TeamError(
+                        "team_merge_failed",
+                        "主工作树 fast-forward 失败",
+                    ) from exc
+                if fast_forward.returncode != 0:
+                    if await self._git_head(state.main_root) != preview.main_head:
+                        raise TeamError("team_main_changed", "主工作树 HEAD 已变化")
+                    raise TeamError(
+                        "team_merge_failed",
+                        "主工作树无法 fast-forward",
+                    )
+                if await self._git_head(state.main_root) != integration_head:
+                    raise TeamError(
+                        "team_merge_failed",
+                        "主工作树 HEAD 与 integration 不一致",
+                    )
+                merged_team = replace(
+                    team,
+                    state="merged",
+                    updated_at=current.isoformat(),
+                )
+                self._write_state(
+                    self._replace_team(
+                        state,
+                        merged_team,
+                        active_team_id=None,
+                    )
+                )
+                return merged_team
 
     async def close(self) -> TeamCloseResult:
         async with self._operation_lock:

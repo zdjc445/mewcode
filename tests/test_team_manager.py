@@ -26,9 +26,11 @@ from mewcode_agent.workers import (
     WorkerRuntimeConfig,
 )
 from mewcode_agent.worktrees import (
+    GitCommandResult,
     GitRepositoryIdentity,
     WorktreeCreateResult,
     WorktreeRecord,
+    WorktreeStatus,
     managed_worktree_path,
     worktree_branch_name,
 )
@@ -36,6 +38,9 @@ from mewcode_agent.worktrees import (
 
 NOW = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 HEAD = "a" * 40
+TASK_HEAD = "b" * 40
+INTEGRATED_HEAD = "c" * 40
+FINAL_HEAD = "d" * 40
 
 
 class SequentialIds:
@@ -62,6 +67,9 @@ class FakeWorktrees:
         self.main_root = root
         self.managed_root = (root / ".mewcode" / ".worktrees").resolve()
         self.records: dict[str, WorktreeRecord] = {}
+        self.heads: dict[str, str] = {}
+        self.dirty: set[str] = set()
+        self.reason_codes: dict[str, str] = {}
 
     def list_records(self) -> tuple[WorktreeRecord, ...]:
         return tuple(self.records[name] for name in sorted(self.records))
@@ -88,7 +96,97 @@ class FakeWorktrees:
             (NOW + timedelta(hours=72)).isoformat(),
         )
         self.records[name] = record
+        self.heads[name] = HEAD
         return WorktreeCreateResult(record, False)
+
+    async def status(self, name: str) -> WorktreeStatus:
+        record = self.records.get(name)
+        if record is None:
+            raise AssertionError(f"unknown worktree: {name}")
+        dirty = name in self.dirty
+        head = self.heads[name]
+        return WorktreeStatus(
+            True,
+            head,
+            dirty,
+            1 if dirty else 0,
+            None,
+            1 if head != record.base_head else 0,
+            head != record.base_head,
+            not dirty and head == record.base_head,
+            self.reason_codes.get(name),
+        )
+
+
+class MergeGit(FakeGit):
+    def __init__(
+        self,
+        root: Path,
+        common: Path,
+        worktrees: FakeWorktrees,
+    ) -> None:
+        super().__init__(root, common)
+        self.worktrees = worktrees
+        self.main_head = HEAD
+        self.main_dirty = False
+        self.task_conflict = False
+        self.absorb_conflict = False
+        self.ff_failure = False
+        self.calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    def _worktree_name(self, cwd: Path) -> str | None:
+        return next(
+            (name for name, record in self.worktrees.records.items() if record.path == cwd),
+            None,
+        )
+
+    async def run(
+        self,
+        cwd: Path,
+        *arguments: str,
+        timeout_seconds: float = 30.0,
+        check: bool = True,
+        error_code: str = "worktree_status_failed",
+    ) -> GitCommandResult:
+        del timeout_seconds, check, error_code
+        self.calls.append((cwd, arguments))
+        name = self._worktree_name(cwd)
+        if arguments == ("rev-parse", "HEAD"):
+            return GitCommandResult(
+                0,
+                self.main_head if cwd == self.root else self.worktrees.heads[name],
+            )
+        if arguments == (
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=normal",
+        ):
+            return GitCommandResult(0, "dirty\x00" if self.main_dirty else "")
+        if arguments[:3] == ("merge", "--no-ff", "--no-edit"):
+            if self.task_conflict:
+                return GitCommandResult(1, "")
+            assert name is not None
+            self.worktrees.heads[name] = INTEGRATED_HEAD
+            return GitCommandResult(0, "")
+        if arguments[:2] == ("merge", "--no-edit"):
+            if self.absorb_conflict:
+                return GitCommandResult(1, "")
+            assert name is not None
+            self.worktrees.heads[name] = FINAL_HEAD
+            return GitCommandResult(0, "")
+        if arguments[:2] == ("merge", "--ff-only"):
+            if self.ff_failure:
+                return GitCommandResult(1, "")
+            assert cwd == self.root
+            integration_name = next(
+                item for item in self.worktrees.records if item.startswith("team/")
+            )
+            self.main_head = self.worktrees.heads[integration_name]
+            return GitCommandResult(0, "")
+        if arguments == ("merge", "--abort"):
+            return GitCommandResult(0, "")
+        raise AssertionError(f"unexpected Git arguments: {arguments}")
 
 
 class RecordingBackend:
@@ -100,6 +198,9 @@ class RecordingBackend:
         self.cancelled: set[str] = set()
         self.closed = 0
         self.failures: set[str] = set()
+        self.heads: dict[str, str] = {}
+        self.workspaces: dict[str, Path] = {}
+        self.branches: dict[str, str] = {}
 
     async def start(self, request: TeamBackendRequest) -> TeamBackendResult:
         self.requests.append(request)
@@ -107,7 +208,12 @@ class RecordingBackend:
         if self.blocked:
             await gate.wait()
         task_id = request.task.task_id
-        workspace = (self.root / "workers" / task_id).resolve()
+        workspace = self.workspaces.get(
+            task_id,
+            (self.root / "workers" / task_id).resolve(),
+        )
+        head = self.heads.get(task_id, HEAD)
+        branch = self.branches.get(task_id, f"branch-{task_id}")
         if task_id in self.cancelled:
             return TeamBackendResult(
                 "cancelled",
@@ -116,8 +222,8 @@ class RecordingBackend:
                 workspace,
                 True,
                 "team_integration_pending",
-                f"branch-{task_id}",
-                HEAD,
+                branch,
+                head,
             )
         if task_id in self.failures:
             return TeamBackendResult(
@@ -127,8 +233,8 @@ class RecordingBackend:
                 workspace,
                 True,
                 "worktree_dirty",
-                f"branch-{task_id}",
-                HEAD,
+                branch,
+                head,
             )
         return TeamBackendResult(
             "completed",
@@ -137,8 +243,8 @@ class RecordingBackend:
             workspace,
             True,
             "team_integration_pending",
-            f"branch-{task_id}",
-            HEAD,
+            branch,
+            head,
         )
 
     async def cancel(self, task_id: str) -> bool:
@@ -577,4 +683,141 @@ async def test_startup_recovers_running_task_and_pauses_missing_role(
     with pytest.raises(TeamError) as caught:
         await manager.resume()
     assert caught.value.code == "team_role_unavailable"
+    await manager.close()
+
+
+async def _completed_merge_team(
+    tmp_path: Path,
+) -> tuple[
+    TeamManager,
+    FakeWorktrees,
+    MergeGit,
+    RecordingBackend,
+    TeamTaskRecord,
+]:
+    root = (tmp_path / "repo").resolve()
+    common = (tmp_path / "git").resolve()
+    root.mkdir()
+    common.mkdir()
+    worktrees = FakeWorktrees(root)
+    git = MergeGit(root, common, worktrees)
+    backend = RecordingBackend(tmp_path)
+    manager = await TeamManager.open(
+        root,
+        TeamRuntimeConfig(),
+        catalog=_catalog(tmp_path, "implementer"),
+        backend=backend,
+        worktree_manager=worktrees,  # type: ignore[arg-type]
+        git=git,  # type: ignore[arg-type]
+        now=lambda: NOW,
+        id_factory=SequentialIds(),
+    )
+    await manager.create_team("alpha", (("build", "implementer"),))
+    task = await manager.create_task("Feature", "Commit the feature.")
+    worker = await worktrees.create(
+        f"worker/{task.task_id}",
+        kind="worker",
+        owner_id=task.task_id,
+    )
+    worktrees.heads[worker.record.name] = TASK_HEAD
+    backend.heads[task.task_id] = TASK_HEAD
+    backend.workspaces[task.task_id] = worker.record.path
+    backend.branches[task.task_id] = worker.record.branch
+    manager.start()
+    await _wait_until(
+        lambda: _task_has_status(manager, task.task_id, "completed")
+    )
+    return manager, worktrees, git, backend, await manager.get_task(task.task_id)
+
+
+async def test_integrate_task_merges_once_and_keeps_worker_worktree(
+    tmp_path: Path,
+) -> None:
+    manager, worktrees, git, _, task = await _completed_merge_team(tmp_path)
+    names_before = tuple(worktrees.records)
+
+    integrated = await manager.integrate_task(task.task_id)
+    repeated = await manager.integrate_task(task.task_id)
+
+    assert integrated.status == "integrated"
+    assert integrated.integrated_head == INTEGRATED_HEAD
+    assert repeated == integrated
+    assert tuple(worktrees.records) == names_before
+    task_merges = [
+        arguments
+        for _, arguments in git.calls
+        if arguments[:3] == ("merge", "--no-ff", "--no-edit")
+    ]
+    assert task_merges == [
+        ("merge", "--no-ff", "--no-edit", task.branch)
+    ]
+    assert (await manager.get_team()).merged_task_ids == (task.task_id,)
+    await manager.close()
+
+
+async def test_integrate_conflict_aborts_and_preserves_completed_state(
+    tmp_path: Path,
+) -> None:
+    manager, worktrees, git, _, task = await _completed_merge_team(tmp_path)
+    git.task_conflict = True
+    integration_name = (await manager.get_team()).integration_worktree_name
+
+    with pytest.raises(TeamError) as caught:
+        await manager.integrate_task(task.task_id)
+
+    assert caught.value.code == "team_merge_conflict"
+    assert (await manager.get_task(task.task_id)).status == "completed"
+    assert worktrees.heads[integration_name] == HEAD
+    assert any(arguments == ("merge", "--abort") for _, arguments in git.calls)
+    await manager.close()
+
+
+async def test_main_merge_uses_preview_then_fast_forwards_without_cleanup(
+    tmp_path: Path,
+) -> None:
+    manager, worktrees, git, _, task = await _completed_merge_team(tmp_path)
+    await manager.integrate_task(task.task_id)
+    names_before = tuple(worktrees.records)
+
+    preview = await manager.preview_main_merge()
+    merged = await manager.merge_into_main(preview)
+
+    assert preview.main_head == HEAD
+    assert preview.integration_head == INTEGRATED_HEAD
+    assert preview.main_dirty is False
+    assert preview.integration_dirty is False
+    assert merged.state == "merged"
+    assert manager.active_team_id is None
+    assert git.main_head == FINAL_HEAD
+    assert tuple(worktrees.records) == names_before
+    arguments = [item for _, item in git.calls]
+    assert ("merge", "--no-edit", HEAD) in arguments
+    assert (
+        "merge",
+        "--ff-only",
+        worktrees.records[merged.integration_worktree_name].branch,
+    ) in arguments
+    assert all(
+        item[0] not in {"push", "reset", "clean", "worktree"}
+        for item in arguments
+    )
+    await manager.close()
+
+
+async def test_main_merge_rejects_changed_main_before_git_side_effect(
+    tmp_path: Path,
+) -> None:
+    manager, _, git, _, task = await _completed_merge_team(tmp_path)
+    await manager.integrate_task(task.task_id)
+    preview = await manager.preview_main_merge()
+    calls_before = len(git.calls)
+    git.main_head = "e" * 40
+
+    with pytest.raises(TeamError) as caught:
+        await manager.merge_into_main(preview)
+
+    assert caught.value.code == "team_main_changed"
+    new_calls = git.calls[calls_before:]
+    assert all(arguments[0] != "merge" for _, arguments in new_calls)
+    assert (await manager.get_team()).state == "active"
     await manager.close()

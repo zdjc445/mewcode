@@ -619,3 +619,52 @@ class TeamCloseResult:
             raise ValueError("cancelled_episodes 超过 active_episodes")
         if self.persisted_episodes > self.active_episodes:
             raise ValueError("persisted_episodes 超过 active_episodes")
+
+
+@dataclass(frozen=True, slots=True)
+class TeamMainMergePreview:
+    team_id: str
+    team_name: str
+    main_path: Path
+    integration_path: Path
+    main_head: str
+    integration_head: str
+    task_counts: tuple[tuple[TeamTaskStatus, int], ...]
+    main_dirty: bool
+    integration_dirty: bool
+
+    def __post_init__(self) -> None:
+        validate_team_id(self.team_id)
+        validate_team_name(self.team_name)
+        for field_name in ("main_path", "integration_path"):
+            value = getattr(self, field_name)
+            if (
+                not isinstance(value, Path)
+                or not value.is_absolute()
+                or value != value.resolve(strict=False)
+            ):
+                raise ValueError(f"{field_name} 无效")
+        validate_object_id(self.main_head)
+        validate_object_id(self.integration_head)
+        valid_states = {
+            "blocked",
+            "pending",
+            "running",
+            "completed",
+            "integrated",
+            "failed",
+            "cancelled",
+        }
+        statuses = tuple(item[0] for item in self.task_counts)
+        if (
+            not isinstance(self.task_counts, tuple)
+            or statuses != tuple(sorted(statuses))
+            or len(statuses) != len(set(statuses))
+            or any(
+                status not in valid_states or type(count) is not int or count < 0
+                for status, count in self.task_counts
+            )
+        ):
+            raise ValueError("task_counts 无效")
+        if type(self.main_dirty) is not bool or type(self.integration_dirty) is not bool:
+            raise ValueError("Merge preview dirty 字段无效")
