@@ -178,6 +178,52 @@ def test_dynamic_session_controls_reject_static_id_collision() -> None:
         )
 
 
+def test_fork_current_session_copies_static_and_dynamic_controls() -> None:
+    static = RuntimeInstruction(
+        "runtime.instructions.project",
+        "instruction",
+        "session",
+        "project rule",
+        "project",
+    )
+    runtime = PromptRuntime(
+        SessionEnvironment(
+            "Windows",
+            "powershell.exe",
+            "D:\\workspace",
+            "China Standard Time",
+            "+08:00",
+        ),
+        FixedRequestEnvironmentCollector(),
+        session_controls=(static,),
+    )
+    dynamic = RuntimeInstruction(
+        "runtime.skills.catalog",
+        "context",
+        "session",
+        "skill catalog",
+        "skill",
+    )
+    runtime.replace_dynamic_session_controls((dynamic,))
+    role = RuntimeInstruction(
+        "runtime.workers.role_example",
+        "context",
+        "session",
+        "worker role",
+        "worker",
+    )
+
+    forked = runtime.fork_current_session(extra_controls=(role,))
+
+    assert [item.instruction_id for item in forked.timeline()] == [
+        "runtime.environment.session",
+        "runtime.instructions.project",
+        "runtime.skills.catalog",
+        "runtime.workers.role_example",
+    ]
+    assert forked.active_request_sequence is None
+
+
 @pytest.mark.asyncio
 async def test_reset_session_clears_timeline_and_request_counter() -> None:
     runtime = make_runtime()

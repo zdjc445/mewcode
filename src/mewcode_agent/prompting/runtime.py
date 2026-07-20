@@ -98,6 +98,34 @@ class PromptRuntime:
             session_controls=session_controls,
         )
 
+    def current_session_controls(self) -> tuple[RuntimeInstruction, ...]:
+        """Snapshot effective session controls, excluding the environment."""
+
+        return tuple(
+            RuntimeInstruction(
+                message.instruction_id,
+                message.kind,
+                "session",
+                message.content,
+                "runtime_snapshot",
+            )
+            for message in self.timeline()
+            if message.scope == "session"
+            and message.instruction_id != "runtime.environment.session"
+        )
+
+    def fork_current_session(
+        self,
+        *,
+        extra_controls: tuple[RuntimeInstruction, ...] = (),
+    ) -> PromptRuntime:
+        """Fork with the current effective session controls copied exactly."""
+
+        self._validate_session_controls(extra_controls)
+        return self.fork(
+            session_controls=(*self.current_session_controls(), *extra_controls)
+        )
+
     def replace_dynamic_session_controls(
         self,
         controls: tuple[RuntimeInstruction, ...],

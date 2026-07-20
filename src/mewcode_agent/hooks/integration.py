@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 from typing import Any
@@ -22,6 +24,13 @@ class _PendingPrompt:
     rule_id: str
 
 
+@dataclass(slots=True)
+class _PromptTarget:
+    runtime: PromptRuntime
+    history_length_provider: Callable[[], int]
+    pending: list[_PendingPrompt]
+
+
 class PromptHookBridge:
     """Inject request controls now or queue them for the next request."""
 
@@ -31,9 +40,35 @@ class PromptHookBridge:
         *,
         history_length_provider: Callable[[], int],
     ) -> None:
-        self._prompt_runtime = prompt_runtime
-        self._history_length_provider = history_length_provider
-        self._pending: list[_PendingPrompt] = []
+        self._main_target = _PromptTarget(
+            prompt_runtime,
+            history_length_provider,
+            [],
+        )
+        self._bound_target: ContextVar[_PromptTarget | None] = ContextVar(
+            f"mewcode_hook_prompt_target_{id(self)}",
+            default=None,
+        )
+
+    def _target(self) -> _PromptTarget:
+        return self._bound_target.get() or self._main_target
+
+    @contextmanager
+    def bind_runtime(
+        self,
+        prompt_runtime: PromptRuntime,
+        *,
+        history_length_provider: Callable[[], int],
+    ) -> Iterator[None]:
+        """Route Hook prompt actions to one isolated Agent runtime."""
+
+        target = _PromptTarget(prompt_runtime, history_length_provider, [])
+        token = self._bound_target.set(target)
+        try:
+            yield
+        finally:
+            target.pending.clear()
+            self._bound_target.reset(token)
 
     async def inject(
         self,
@@ -42,27 +77,30 @@ class PromptHookBridge:
         event_sequence: int,
         rule_id: str,
     ) -> None:
+        target = self._target()
         item = _PendingPrompt(content, event_sequence, rule_id)
-        if self._prompt_runtime.active_request_sequence is None:
-            self._pending.append(item)
+        if target.runtime.active_request_sequence is None:
+            target.pending.append(item)
             return
-        self._inject_now(item)
+        self._inject_now(target, item)
 
     async def flush(self) -> tuple[str, ...]:
-        if self._prompt_runtime.active_request_sequence is None:
+        target = self._target()
+        if target.runtime.active_request_sequence is None:
             return ()
-        pending = tuple(self._pending)
-        self._pending.clear()
+        pending = tuple(target.pending)
+        target.pending.clear()
         failed: list[str] = []
         for item in pending:
             try:
-                self._inject_now(item)
+                self._inject_now(target, item)
             except (ValueError, RuntimeError):
                 failed.append(item.rule_id)
         return tuple(failed)
 
-    def _inject_now(self, item: _PendingPrompt) -> None:
-        self._prompt_runtime.inject(
+    @staticmethod
+    def _inject_now(target: _PromptTarget, item: _PendingPrompt) -> None:
+        target.runtime.inject(
             RuntimeInstruction(
                 (
                     f"hook.prompt.event_{item.event_sequence}."
@@ -73,12 +111,13 @@ class PromptHookBridge:
                 item.content,
                 "hook",
             ),
-            history_length=self._history_length_provider(),
+            history_length=target.history_length_provider(),
         )
 
     def discard_pending(self) -> int:
-        count = len(self._pending)
-        self._pending.clear()
+        target = self._target()
+        count = len(target.pending)
+        target.pending.clear()
         return count
 
     def reset_session(
@@ -86,18 +125,19 @@ class PromptHookBridge:
         *,
         preserve_rule_ids: frozenset[str],
     ) -> int:
+        target = self._target()
         retained = [
             item
-            for item in self._pending
+            for item in target.pending
             if item.rule_id in preserve_rule_ids
         ]
-        discarded = len(self._pending) - len(retained)
-        self._pending = retained
+        discarded = len(target.pending) - len(retained)
+        target.pending = retained
         return discarded
 
     @property
     def pending_count(self) -> int:
-        return len(self._pending)
+        return len(self._target().pending)
 
 
 class HookToolExecutionInterceptor:

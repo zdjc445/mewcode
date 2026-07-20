@@ -33,15 +33,21 @@ class ToolRegistry:
         self,
         *,
         security_boundary: SecurityBoundary | None = None,
+        file_state_cache: FileStateCache | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {}
         self._mcp_tools_by_server: dict[str, tuple[Tool, ...]] = {}
         self._skill_tools: tuple[Tool, ...] = ()
         self._security_boundary = security_boundary
+        self._file_state_cache = file_state_cache
 
     @property
     def security_boundary(self) -> SecurityBoundary | None:
         return self._security_boundary
+
+    @property
+    def file_state_cache(self) -> FileStateCache | None:
+        return self._file_state_cache
 
     def register(self, tool: Tool) -> None:
         if tool.name.startswith("mcp_"):
@@ -303,8 +309,11 @@ def create_core_registry(
 ) -> ToolRegistry:
     path_sandbox = PathSandbox(working_directory or Path.cwd())
     security_boundary = SecurityBoundary(path_sandbox)
-    registry = ToolRegistry(security_boundary=security_boundary)
     file_state_cache = FileStateCache()
+    registry = ToolRegistry(
+        security_boundary=security_boundary,
+        file_state_cache=file_state_cache,
+    )
     tools = (
         ReadFileTool(file_state_cache, path_sandbox),
         WriteFileTool(file_state_cache, path_sandbox),

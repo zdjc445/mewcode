@@ -58,6 +58,37 @@ async def test_read_and_write_file_tools(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_state_cache_isolated_context_does_not_share_reads(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "example.txt"
+    path.write_text("before", encoding="utf-8")
+    registry = create_core_registry(working_directory=tmp_path)
+    cache = registry.file_state_cache
+    assert cache is not None
+    await _read_file(registry, path)
+
+    with cache.isolated():
+        isolated_write = await registry.execute(
+            "write_file",
+            json.dumps({"path": str(path), "content": "isolated"}),
+        )
+        assert isolated_write.error_code == "file_not_read"
+        await _read_file(registry, path)
+        isolated_write = await registry.execute(
+            "write_file",
+            json.dumps({"path": str(path), "content": "isolated"}),
+        )
+        assert isolated_write.success is True
+
+    main_write = await registry.execute(
+        "write_file",
+        json.dumps({"path": str(path), "content": "main"}),
+    )
+    assert main_write.error_code == "file_changed_since_read"
+
+
+@pytest.mark.asyncio
 async def test_read_file_supports_line_pagination(tmp_path: Path) -> None:
     path = tmp_path / "example.txt"
     path.write_text(

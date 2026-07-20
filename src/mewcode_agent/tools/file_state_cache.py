@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -22,21 +25,41 @@ class FileStateCache:
 
     def __init__(self) -> None:
         self._states: dict[Path, FileState] = {}
+        self._bound_states: ContextVar[dict[Path, FileState] | None] = (
+            ContextVar(
+                f"mewcode_file_state_{id(self)}",
+                default=None,
+            )
+        )
         self._lock = Lock()
+
+    def _current_states(self) -> dict[Path, FileState]:
+        bound = self._bound_states.get()
+        return self._states if bound is None else bound
+
+    @contextmanager
+    def isolated(self) -> Iterator[None]:
+        """Bind a fresh state mapping to this async execution context."""
+
+        token = self._bound_states.set({})
+        try:
+            yield
+        finally:
+            self._bound_states.reset(token)
 
     def record(self, path: Path) -> None:
         resolved_path = path.resolve()
         stat = resolved_path.stat()
         state = FileState(mtime_ns=stat.st_mtime_ns, size=stat.st_size)
         with self._lock:
-            self._states[resolved_path] = state
+            self._current_states()[resolved_path] = state
 
     def ensure_current(self, path: Path) -> None:
         resolved_path = path.resolve()
         stat = resolved_path.stat()
         current_state = FileState(mtime_ns=stat.st_mtime_ns, size=stat.st_size)
         with self._lock:
-            expected_state = self._states.get(resolved_path)
+            expected_state = self._current_states().get(resolved_path)
         if expected_state is None:
             raise ToolExecutionError(
                 "file_not_read",

@@ -93,6 +93,56 @@ async def test_prompt_bridge_session_reset_only_preserves_startup_rules() -> Non
     assert bridge.pending_count == 1
 
 
+async def test_prompt_bridge_context_binding_isolates_worker_prompts() -> None:
+    main_runtime = make_runtime()
+    worker_runtime = make_runtime()
+    bridge = PromptHookBridge(
+        main_runtime,
+        history_length_provider=lambda: 0,
+    )
+    await main_runtime.begin_request(history_length=0, mode="executing")
+    await worker_runtime.begin_request(history_length=0, mode="executing")
+
+    with bridge.bind_runtime(
+        worker_runtime,
+        history_length_provider=lambda: 0,
+    ):
+        await bridge.inject(
+            "worker only",
+            event_sequence=3,
+            rule_id="worker_rule",
+        )
+
+    assert "hook.prompt.event_3.rule_worker_rule" in {
+        item.instruction_id for item in worker_runtime.timeline()
+    }
+    assert "hook.prompt.event_3.rule_worker_rule" not in {
+        item.instruction_id for item in main_runtime.timeline()
+    }
+
+
+async def test_prompt_bridge_discards_bound_pending_on_exit() -> None:
+    main_runtime = make_runtime()
+    worker_runtime = make_runtime()
+    bridge = PromptHookBridge(
+        main_runtime,
+        history_length_provider=lambda: 0,
+    )
+
+    with bridge.bind_runtime(
+        worker_runtime,
+        history_length_provider=lambda: 0,
+    ):
+        await bridge.inject(
+            "worker pending",
+            event_sequence=4,
+            rule_id="worker_pending",
+        )
+        assert bridge.pending_count == 1
+
+    assert bridge.pending_count == 0
+
+
 class FakeHookEngine:
     def __init__(self, *, block: bool = False) -> None:
         self.block = block
