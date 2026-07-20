@@ -1,11 +1,17 @@
 """In-memory conversation history."""
 
+from __future__ import annotations
+
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from typing import TYPE_CHECKING
 
 from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
-from mewcode_agent.tools.base import ToolResult
+
+if TYPE_CHECKING:
+    from mewcode_agent.tools.base import ToolResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,17 +38,26 @@ class ToolMessageReplacement:
 class ConversationHistory:
     """Store ordered messages for the lifetime of the current process."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        append_recorder: Callable[[ChatMessage], None] | None = None,
+    ) -> None:
         self._messages: list[ChatMessage] = []
+        self._append_recorder = append_recorder
+
+    def _append(self, message: ChatMessage) -> None:
+        if self._append_recorder is not None:
+            self._append_recorder(message)
+        self._messages.append(message)
 
     def add_user(self, content: str) -> ChatMessage:
         message = ChatMessage(role="user", content=content)
-        self._messages.append(message)
+        self._append(message)
         return message
 
     def add_assistant(self, content: str) -> ChatMessage:
         message = ChatMessage(role="assistant", content=content)
-        self._messages.append(message)
+        self._append(message)
         return message
 
     def add_assistant_tool_call(
@@ -73,7 +88,7 @@ class ConversationHistory:
             tool_calls=tool_calls,
             thinking_blocks=thinking_blocks,
         )
-        self._messages.append(message)
+        self._append(message)
         return message
 
     def add_tool_result(
@@ -90,13 +105,26 @@ class ConversationHistory:
             ),
             tool_call_id=call_id,
         )
-        self._messages.append(message)
+        self._append(message)
         return message
 
     def snapshot(self) -> list[ChatMessage]:
         """Return a shallow copy so callers cannot mutate internal state."""
 
         return list(self._messages)
+
+    def set_append_recorder(
+        self,
+        recorder: Callable[[ChatMessage], None] | None,
+    ) -> None:
+        self._append_recorder = recorder
+
+    def restore(self, messages: tuple[ChatMessage, ...]) -> None:
+        if not isinstance(messages, tuple) or any(
+            not isinstance(message, ChatMessage) for message in messages
+        ):
+            raise ValueError("messages 必须是 ChatMessage tuple")
+        self._messages = list(messages)
 
     def replace_tool_messages(
         self,

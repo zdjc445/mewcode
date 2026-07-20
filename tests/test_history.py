@@ -30,6 +30,23 @@ def test_snapshot_does_not_mutate_internal_history() -> None:
     assert history.snapshot()[0].content == "保留内容"
 
 
+def test_history_can_replace_recorder_and_restore_without_recording() -> None:
+    first: list[ChatMessage] = []
+    second: list[ChatMessage] = []
+    history = ConversationHistory(first.append)
+    history.add_user("first")
+    history.set_append_recorder(second.append)
+    history.restore((ChatMessage(role="assistant", content="restored"),))
+    history.add_user("second")
+
+    assert first == [ChatMessage(role="user", content="first")]
+    assert second == [ChatMessage(role="user", content="second")]
+    assert history.snapshot() == [
+        ChatMessage(role="assistant", content="restored"),
+        ChatMessage(role="user", content="second"),
+    ]
+
+
 @pytest.mark.parametrize("role", ["system", "User", "ASSISTANT", ""])
 def test_chat_message_rejects_invalid_role(role: str) -> None:
     with pytest.raises(ValueError, match="role 必须"):
