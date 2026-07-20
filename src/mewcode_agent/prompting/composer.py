@@ -1,6 +1,7 @@
 """Pure prompt assembly and shared control-message rendering."""
 
 from html import escape
+import re
 
 from mewcode_agent.models import ChatMessage
 from mewcode_agent.prompting.models import (
@@ -9,6 +10,10 @@ from mewcode_agent.prompting.models import (
     ContextSummaryMessage,
     PromptFrame,
     PromptModule,
+)
+
+_NOTE_CONTROL_ID = re.compile(
+    r"runtime\.notes\.(project|user)\.generation_([1-9][0-9]*)\Z"
 )
 
 
@@ -79,8 +84,22 @@ class PromptComposer:
             last_sequence = message.sequence
             last_anchor = message.anchor
 
+        latest_note_generations: dict[str, int] = {}
+        for message in timeline:
+            match = _NOTE_CONTROL_ID.fullmatch(message.instruction_id)
+            if match is not None:
+                scope, generation_text = match.groups()
+                latest_note_generations[scope] = max(
+                    latest_note_generations.get(scope, 0),
+                    int(generation_text),
+                )
         controls_by_anchor: dict[int, list[ControlMessage]] = {}
         for message in timeline:
+            match = _NOTE_CONTROL_ID.fullmatch(message.instruction_id)
+            if match is not None and int(match.group(2)) != (
+                latest_note_generations[match.group(1)]
+            ):
+                continue
             controls_by_anchor.setdefault(message.anchor, []).append(message)
         items: list[ChatMessage | ControlMessage] = []
         for anchor in range(len(history) + 1):

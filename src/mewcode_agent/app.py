@@ -35,6 +35,13 @@ from mewcode_agent.agent import (
 )
 from mewcode_agent.compaction import ContextCompactionError
 from mewcode_agent.history import ConversationHistory
+from mewcode_agent.notes import (
+    NoteClearTarget,
+    NoteCommand,
+    NotesError,
+    NotesManager,
+    parse_note_command,
+)
 from mewcode_agent.sessions import (
     SessionCommand,
     SessionDeleteTarget,
@@ -291,6 +298,68 @@ class SessionDeleteScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class NoteClearScreen(ModalScreen[bool]):
+    """Require explicit confirmation before clearing one note scope."""
+
+    BINDINGS = [("escape", "cancel_clear", "取消清空")]
+
+    CSS = """
+    NoteClearScreen {
+        align: center middle;
+        background: $background 60%;
+    }
+
+    #note-clear-card {
+        width: 80;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+
+    #note-clear-actions {
+        height: auto;
+        margin-top: 1;
+    }
+
+    #note-clear-actions Button {
+        margin-right: 1;
+    }
+    """
+
+    def __init__(self, target: NoteClearTarget) -> None:
+        super().__init__()
+        self._target = target
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="note-clear-card"):
+            yield Static("清空笔记")
+            yield Static(f"scope：{self._target.scope}")
+            yield Static(f"路径：{self._target.path}")
+            with Horizontal(id="note-clear-actions"):
+                yield Button(
+                    "确认清空",
+                    id="confirm-note-clear",
+                    variant="warning",
+                )
+                yield Button(
+                    "取消",
+                    id="cancel-note-clear",
+                    variant="primary",
+                )
+
+    @on(Button.Pressed, "#confirm-note-clear")
+    def confirm_clear(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#cancel-note-clear")
+    def cancel_clear(self) -> None:
+        self.dismiss(False)
+
+    def action_cancel_clear(self) -> None:
+        self.dismiss(False)
+
+
 class ChatApp(App[None]):
     """Consume AgentLoop events in a single-session terminal UI."""
 
@@ -337,6 +406,7 @@ class ChatApp(App[None]):
         model: str,
         session_manager: SessionManager | None = None,
         session_activator: Callable[[SessionRecovery], None] | None = None,
+        notes_manager: NotesManager | None = None,
     ) -> None:
         super().__init__()
         if (session_manager is None) != (session_activator is None):
@@ -349,12 +419,14 @@ class ChatApp(App[None]):
         self.model = model
         self.session_manager = session_manager
         self._session_activator = session_activator
+        self.notes_manager = notes_manager
         self.active_response = ""
         self.active_thinking = ""
         self._command_output: list[str] = []
         self._active_context: AgentRunContext | None = None
         self._active_compaction_worker: Worker[None] | None = None
         self._active_session_worker: Worker[None] | None = None
+        self._active_note_worker: Worker[None] | None = None
 
     def compose(self) -> ComposeResult:
         yield RichLog(id="chat-log", wrap=True, markup=False)
@@ -416,6 +488,18 @@ class ChatApp(App[None]):
             return
 
         plan_switch = self.query_one("#plan-only-switch", Switch)
+        note_command = (
+            parse_note_command(prompt)
+            if self.notes_manager is not None
+            else None
+        )
+        if note_command is not None:
+            self._clear_active_output()
+            prompt_input.disabled = True
+            plan_switch.disabled = True
+            self._set_status("正在处理笔记命令")
+            self._active_note_worker = self.run_note_command(note_command)
+            return
         session_command = (
             parse_session_command(prompt)
             if self.session_manager is not None
@@ -527,6 +611,8 @@ class ChatApp(App[None]):
 
             assert command.kind == "resume"
             assert self._session_activator is not None
+            if self.notes_manager is not None:
+                await self.notes_manager.wait_until_idle()
             recovery = await manager.resume_async(
                 command.session_id,
                 activate=self._session_activator,
@@ -561,6 +647,58 @@ class ChatApp(App[None]):
             )
         finally:
             self._active_session_worker = None
+            prompt_input.disabled = False
+            plan_switch.disabled = False
+            prompt_input.focus()
+
+    @work(exclusive=True, exit_on_error=False)
+    async def run_note_command(self, command: NoteCommand) -> None:
+        prompt_input = self.query_one("#prompt-input", Input)
+        plan_switch = self.query_one("#plan-only-switch", Switch)
+        manager = self.notes_manager
+        assert manager is not None
+        try:
+            if command.kind == "show":
+                snapshot = manager.snapshot
+
+                def section(title: str, entries: tuple[str, ...]) -> list[str]:
+                    return [title, *(f"- {entry}" for entry in entries)] if entries else [title, "(空)"]
+
+                self._show_command_output(
+                    *section("用户偏好", snapshot.user_preferences),
+                    *section("纠正反馈", snapshot.correction_feedback),
+                    *section("项目知识", snapshot.project_knowledge),
+                    *section("参考资料", snapshot.references),
+                )
+                self._set_status("已显示当前笔记")
+                return
+            if command.kind == "paths":
+                self._show_command_output(
+                    f"user: {manager.paths.user}",
+                    f"project: {manager.paths.project}",
+                )
+                self._set_status("已显示笔记路径")
+                return
+            scope = "user" if command.kind == "clear_user" else "project"
+            target = manager.clear_target(scope)
+            confirmed = await self.push_screen_wait(NoteClearScreen(target))
+            if not confirmed:
+                self._set_status("已取消清空笔记")
+                return
+            await manager.clear(scope)
+            self._show_command_output(
+                f"已清空 {scope} 笔记：{target.path}"
+            )
+            self._set_status("笔记已清空")
+        except NotesError as exc:
+            self._set_status(f"笔记命令失败：{exc.message}（{exc.code}）")
+        except Exception:
+            self._set_status(
+                "笔记命令失败：笔记操作发生未预期错误"
+                "（notes_write_failed）"
+            )
+        finally:
+            self._active_note_worker = None
             prompt_input.disabled = False
             plan_switch.disabled = False
             prompt_input.focus()
@@ -662,6 +800,8 @@ class ChatApp(App[None]):
             self._clear_active_output()
             self._render_transcript()
             self._set_status("就绪")
+            if self.notes_manager is not None:
+                self.notes_manager.record_successful_request()
         elif isinstance(event, RunErrorEvent):
             self._clear_active_output()
             self._render_transcript()

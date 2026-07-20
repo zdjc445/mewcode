@@ -1,5 +1,9 @@
 from mewcode_agent.agent.events import AgentEvent
-from mewcode_agent.agent.usage import CompactionUsageRecord, UsageRecord
+from mewcode_agent.agent.usage import (
+    CompactionUsageRecord,
+    NoteUsageRecord,
+    UsageRecord,
+)
 from mewcode_agent.providers.base import ProviderUsage, ProviderUsageResult
 
 
@@ -48,3 +52,12 @@ def test_compaction_usage_record_has_separate_request_kind() -> None:
         "executing",
         result,
     ).request_kind == "agent"
+
+
+def test_note_usage_record_has_distinct_request_kind() -> None:
+    result = ProviderUsageResult("unavailable", None, "not reported")
+    record = NoteUsageRecord("provider", 2, result)
+
+    assert record.request_kind == "notes"
+    assert record.generation == 2
+    assert not hasattr(record, "request_sequence")

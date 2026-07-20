@@ -28,6 +28,14 @@ from mewcode_agent.mcp import (
     McpError,
     load_mcp_config,
 )
+from mewcode_agent.notes import (
+    NoteUpdater,
+    NoteWarning,
+    NotesError,
+    NotesManager,
+    load_notes,
+    note_paths,
+)
 from mewcode_agent.prompting import (
     GitRequestEnvironmentCollector,
     PromptComposer,
@@ -66,12 +74,21 @@ def _print_mcp_diagnostic(diagnostic: McpDiagnostic) -> None:
     )
 
 
+def _print_note_warning(warning: NoteWarning) -> None:
+    scope = warning.scope if warning.scope is not None else "all"
+    print(
+        f"笔记警告：scope={scope} code={warning.code}",
+        file=sys.stderr,
+    )
+
+
 async def run_application() -> int:
     """Build and run one application session on the current event loop."""
 
     mcp_manager: McpConnectionManager | None = None
     artifact_store: ContextArtifactStore | None = None
     session_manager: SessionManager | None = None
+    notes_manager: NotesManager | None = None
     try:
         session_environment = collect_session_environment()
         working_directory = Path(
@@ -105,6 +122,11 @@ async def run_application() -> int:
             user_root=user_config_directory,
             project_root=working_directory,
         )
+        paths = note_paths(
+            user_root=user_config_directory,
+            project_root=working_directory,
+        )
+        initial_notes = load_notes(paths=paths)
         environment_collector = GitRequestEnvironmentCollector(
             working_directory=Path(
                 session_environment.working_directory
@@ -116,7 +138,7 @@ async def run_application() -> int:
             session_controls=tuple(
                 document.to_runtime_instruction()
                 for document in instruction_documents
-            ),
+            ) + initial_notes.runtime_controls(generation=1),
         )
         prompt_composer = PromptComposer(modules)
         permanent_rules = approval_store.load()
@@ -135,6 +157,18 @@ async def run_application() -> int:
             history=history,
         )
         provider = create_provider(provider_config, config.api_key)
+        notes_manager = NotesManager(
+            NoteUpdater(
+                provider,
+                project_root=working_directory,
+                timeout_seconds=120.0,
+            ),
+            paths=paths,
+            initial_snapshot=initial_notes,
+            history=history,
+            prompt_runtime=prompt_runtime,
+            warning_handler=_print_note_warning,
+        )
         compaction_config = CompactionConfig()
         artifact_store = ContextArtifactStore(
             root=user_config_directory / "context-artifacts",
@@ -194,6 +228,7 @@ async def run_application() -> int:
         McpError,
         ContextCompactionError,
         SessionError,
+        NotesError,
     ) as exc:
         try:
             if session_manager is not None:
@@ -217,6 +252,7 @@ async def run_application() -> int:
             context_window_manager=context_window_manager,
         )
         assert session_manager is not None
+        assert notes_manager is not None
 
         def activate_session(recovery: SessionRecovery) -> None:
             documents = load_instruction_documents(
@@ -226,6 +262,7 @@ async def run_application() -> int:
             controls = tuple(
                 document.to_runtime_instruction() for document in documents
             )
+            controls = (*controls, *notes_manager.reload_for_session())
             gap = session_manager.resume_gap_instruction(recovery.meta)
             if gap is not None:
                 controls = (*controls, gap)
@@ -238,6 +275,7 @@ async def run_application() -> int:
             model=provider_config.model,
             session_manager=session_manager,
             session_activator=activate_session,
+            notes_manager=notes_manager,
         )
         await app.run_async()
         return 0
@@ -245,13 +283,17 @@ async def run_application() -> int:
         assert mcp_manager is not None
         assert artifact_store is not None
         assert session_manager is not None
+        assert notes_manager is not None
         try:
-            session_manager.close()
+            await notes_manager.flush_on_exit()
         finally:
             try:
-                await mcp_manager.close()
+                session_manager.close()
             finally:
-                await artifact_store.close()
+                try:
+                    await mcp_manager.close()
+                finally:
+                    await artifact_store.close()
 
 
 def main() -> int:

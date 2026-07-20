@@ -31,6 +31,7 @@ from mewcode_agent.app import ChatApp
 from mewcode_agent.compaction import ManualCompactionResult
 from mewcode_agent.history import ConversationHistory
 from mewcode_agent.models import ChatMessage, ToolCall
+from mewcode_agent.notes import NoteClearTarget, NotePaths, NotesSnapshot
 from mewcode_agent.sessions import SessionJournal, SessionManager
 from mewcode_agent.tools.base import ToolResult
 
@@ -252,6 +253,35 @@ class RestorableAgentLoop:
         self.prepare_calls += 1
         assert len(history.snapshot()) >= 1
         return None
+
+
+class FakeNotesManager:
+    def __init__(self, tmp_path: Path) -> None:
+        self.snapshot = NotesSnapshot(
+            user_preferences=("concise",),
+            correction_feedback=("keep exact names",),
+            project_knowledge=("entry src/main.py",),
+            references=("docs/spec.md",),
+        )
+        self.paths = NotePaths(
+            (tmp_path / "user-notes.md").resolve(),
+            (tmp_path / "project-notes.md").resolve(),
+        )
+        self.successes = 0
+        self.clear_calls: list[str] = []
+
+    def record_successful_request(self) -> None:
+        self.successes += 1
+
+    async def wait_until_idle(self) -> None:
+        return None
+
+    def clear_target(self, scope: str) -> NoteClearTarget:
+        path = self.paths.user if scope == "user" else self.paths.project
+        return NoteClearTarget(scope, path)  # type: ignore[arg-type]
+
+    async def clear(self, scope: str) -> None:
+        self.clear_calls.append(scope)
 
 
 def make_app(
@@ -590,6 +620,136 @@ async def test_non_exact_session_command_remains_ordinary_user_message(
         role="user",
         content="/Sessions",
     )
+
+
+@pytest.mark.asyncio
+async def test_notes_show_and_paths_commands_do_not_enter_history(
+    tmp_path: Path,
+) -> None:
+    notes = FakeNotesManager(tmp_path)
+    history = ConversationHistory()
+    app = ChatApp(
+        RestorableAgentLoop(),  # type: ignore[arg-type]
+        history,
+        provider_id="provider",
+        model="model",
+        notes_manager=notes,  # type: ignore[arg-type]
+    )
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "/notes"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        prompt_input.value = "/notes paths"
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        text = render_log_text(app.query_one("#chat-log", RichLog)).replace(
+            "\n",
+            "",
+        )
+        assert "用户偏好" in text and "concise" in text
+        assert "纠正反馈" in text and "keep exact names" in text
+        assert "项目知识" in text and "entry src/main.py" in text
+        assert "参考资料" in text and "docs/spec.md" in text
+        assert str(notes.paths.user) in text
+        assert str(notes.paths.project) in text
+
+    assert history.snapshot() == []
+
+
+@pytest.mark.asyncio
+async def test_notes_clear_requires_scope_and_path_confirmation(
+    tmp_path: Path,
+) -> None:
+    notes = FakeNotesManager(tmp_path)
+    history = ConversationHistory()
+    app = ChatApp(
+        RestorableAgentLoop(),  # type: ignore[arg-type]
+        history,
+        provider_id="provider",
+        model="model",
+        notes_manager=notes,  # type: ignore[arg-type]
+    )
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "/notes clear project"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        screen_text = "\n".join(
+            str(widget.render()) for widget in app.screen.query(Static)
+        )
+        assert "scope：project" in screen_text
+        assert str(notes.paths.project) in screen_text
+        assert notes.clear_calls == []
+
+        await pilot.click("#confirm-note-clear")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert notes.clear_calls == ["project"]
+        assert "笔记已清空" in str(
+            app.query_one("#status", Static).render()
+        )
+
+    assert history.snapshot() == []
+
+
+@pytest.mark.asyncio
+async def test_final_response_counts_one_success_for_notes(
+    tmp_path: Path,
+) -> None:
+    notes = FakeNotesManager(tmp_path)
+    loop = GatedAgentLoop()
+    history = ConversationHistory()
+    app = ChatApp(
+        loop,
+        history,
+        provider_id="provider",
+        model="model",
+        notes_manager=notes,  # type: ignore[arg-type]
+    )
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "successful request"
+        await pilot.press("enter")
+        await loop.started.wait()
+        assert notes.successes == 0
+        loop.release.set()
+        await app.workers.wait_for_complete()
+
+    assert notes.successes == 1
+
+
+@pytest.mark.asyncio
+async def test_non_exact_notes_command_is_ordinary_user_message(
+    tmp_path: Path,
+) -> None:
+    notes = FakeNotesManager(tmp_path)
+    loop = GatedAgentLoop()
+    history = ConversationHistory()
+    app = ChatApp(
+        loop,
+        history,
+        provider_id="provider",
+        model="model",
+        notes_manager=notes,  # type: ignore[arg-type]
+    )
+
+    async with app.run_test() as pilot:
+        prompt_input = app.query_one("#prompt-input", Input)
+        prompt_input.value = "/Notes"
+        await pilot.press("enter")
+        await loop.started.wait()
+        loop.release.set()
+        await app.workers.wait_for_complete()
+
+    assert history.snapshot()[0] == ChatMessage(role="user", content="/Notes")
 
 
 @pytest.mark.asyncio

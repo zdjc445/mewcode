@@ -163,3 +163,57 @@ def test_runtime_and_composer_api_are_exported_from_prompting_package() -> None:
     assert prompting.PromptComposer is PromptComposer
     assert prompting.PromptRuntime is PromptRuntime
     assert prompting.render_control_message is render_control_message
+
+
+def test_composer_projects_only_latest_note_generation_per_scope() -> None:
+    composer = PromptComposer(
+        (PromptModule("core.identity", 100, "I", "builtin", True),)
+    )
+    timeline = (
+        ControlMessage(
+            "runtime.notes.project.generation_1",
+            "context",
+            "session",
+            "old project",
+            1,
+            0,
+            None,
+            None,
+        ),
+        ControlMessage(
+            "runtime.notes.user.generation_1",
+            "context",
+            "session",
+            "old user",
+            2,
+            0,
+            None,
+            None,
+        ),
+        ControlMessage(
+            "runtime.notes.project.generation_2",
+            "context",
+            "session",
+            "new project",
+            3,
+            1,
+            None,
+            None,
+        ),
+        ControlMessage(
+            "runtime.notes.user.generation_3",
+            "context",
+            "session",
+            "new user",
+            4,
+            1,
+            None,
+            None,
+        ),
+    )
+    history = [ChatMessage(role="user", content="message")]
+
+    frame = composer.compose(history, timeline)
+
+    controls = [item for item in frame.items if isinstance(item, ControlMessage)]
+    assert [item.content for item in controls] == ["new project", "new user"]

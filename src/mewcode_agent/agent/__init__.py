@@ -33,6 +33,7 @@ from mewcode_agent.agent.tool_scheduler import (
 )
 from mewcode_agent.agent.usage import (
     CompactionUsageRecord,
+    NoteUsageRecord,
     UsageCollector,
     UsageRecord,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "ContextCompactionStartedEvent",
     "ContextCompactionWarningEvent",
     "CompactionUsageRecord",
+    "NoteUsageRecord",
     "FinalResponseEvent",
     "ModelTextEvent",
     "ModelThinkingEvent",

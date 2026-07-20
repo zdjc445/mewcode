@@ -50,8 +50,25 @@ class CompactionUsageRecord:
         return "compaction"
 
 
+@dataclass(frozen=True, slots=True)
+class NoteUsageRecord:
+    provider_id: str
+    generation: int
+    result: ProviderUsageResult
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.provider_id, str) or not self.provider_id.strip():
+            raise ValueError("provider_id 必须为非空字符串")
+        if type(self.generation) is not int or self.generation <= 0:
+            raise ValueError("generation 必须大于 0")
+
+    @property
+    def request_kind(self) -> Literal["notes"]:
+        return "notes"
+
+
 class UsageCollector(Protocol):
     def record(
         self,
-        record: UsageRecord | CompactionUsageRecord,
+        record: UsageRecord | CompactionUsageRecord | NoteUsageRecord,
     ) -> None: ...

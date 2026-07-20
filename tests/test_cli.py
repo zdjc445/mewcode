@@ -7,6 +7,7 @@ import pytest
 
 from mewcode_agent import cli
 from mewcode_agent.mcp import McpConnectFailed, McpConfiguration
+from mewcode_agent.notes import NotesSnapshot, note_paths, write_note_scope
 from mewcode_agent.prompting.environment import PromptEnvironmentError
 from mewcode_agent.tools.registry import ToolRegistry
 
@@ -352,6 +353,64 @@ def test_cli_loads_project_then_user_instruction_controls(
     ]
 
 
+def test_cli_loads_project_then_user_note_controls_before_app_start(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    home_path = tmp_path / "home"
+    paths = note_paths(
+        user_root=home_path / ".mewcode-agent",
+        project_root=tmp_path,
+    )
+    snapshot = NotesSnapshot(
+        user_preferences=("concise",),
+        correction_feedback=("exact names",),
+        project_knowledge=("entry src/main.py",),
+        references=("docs/spec.md",),
+    )
+    write_note_scope(paths=paths, scope="user", snapshot=snapshot)
+    write_note_scope(paths=paths, scope="project", snapshot=snapshot)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+    calls: list[dict[str, object]] = []
+
+    class FakeAgentLoop:
+        def __init__(
+            self,
+            provider: object,
+            registry: ToolRegistry,
+            **kwargs: object,
+        ) -> None:
+            calls.append(
+                {"provider": provider, "registry": registry, **kwargs}
+            )
+
+    async def run_app(_self: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
+
+    assert cli.main() == 0
+    runtime = calls[0]["prompt_runtime"]
+    timeline = runtime.timeline()  # type: ignore[union-attr]
+    assert [item.instruction_id for item in timeline[:3]] == [
+        "runtime.environment.session",
+        "runtime.notes.project.generation_1",
+        "runtime.notes.user.generation_1",
+    ]
+    assert '"project_knowledge":["entry src/main.py"]' in (
+        timeline[1].content
+    )
+    assert '"user_preferences":["concise"]' in timeline[2].content
+
+
 def test_cli_reports_instruction_error_without_file_content(
     tmp_path: Path,
     valid_config_text: str,
@@ -635,3 +694,57 @@ def test_cli_closes_manager_when_textual_run_fails(
     with pytest.raises(RuntimeError, match="textual failed"):
         cli.main()
     assert events == ["activate", "app", "close"]
+
+
+def test_cli_shutdown_flushes_notes_before_session_mcp_and_artifact(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+    events: list[str] = []
+
+    original_flush = cli.NotesManager.flush_on_exit
+    original_session_close = cli.SessionManager.close
+    original_mcp_close = cli.McpConnectionManager.close
+    original_artifact_close = cli.ContextArtifactStore.close
+
+    async def flush_notes(self: object) -> None:
+        events.append("notes_flush")
+        await original_flush(self)  # type: ignore[arg-type]
+
+    def close_session(self: object) -> None:
+        events.append("session_close")
+        original_session_close(self)  # type: ignore[arg-type]
+
+    async def close_mcp(self: object) -> None:
+        events.append("mcp_close")
+        await original_mcp_close(self)  # type: ignore[arg-type]
+
+    async def close_artifact(self: object) -> None:
+        events.append("artifact_close")
+        await original_artifact_close(self)  # type: ignore[arg-type]
+
+    async def run_app(_self: object) -> None:
+        events.append("app")
+
+    monkeypatch.setattr(cli.NotesManager, "flush_on_exit", flush_notes)
+    monkeypatch.setattr(cli.SessionManager, "close", close_session)
+    monkeypatch.setattr(cli.McpConnectionManager, "close", close_mcp)
+    monkeypatch.setattr(cli.ContextArtifactStore, "close", close_artifact)
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
+
+    assert cli.main() == 0
+    assert events == [
+        "app",
+        "notes_flush",
+        "session_close",
+        "mcp_close",
+        "artifact_close",
+    ]
