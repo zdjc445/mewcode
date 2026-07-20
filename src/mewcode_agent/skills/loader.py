@@ -189,6 +189,31 @@ def _within(path: Path, root: Path) -> bool:
     return True
 
 
+def _json_value(value: Any, *, label: str) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        raise _error("skill_manifest_invalid", f"{label} 包含非有限浮点数")
+    if isinstance(value, list):
+        return [
+            _json_value(item, label=f"{label}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise _error(
+                    "skill_manifest_invalid",
+                    f"{label} 包含非字符串 JSON object key",
+                )
+            normalized[key] = _json_value(item, label=f"{label}.{key}")
+        return normalized
+    raise _error("skill_manifest_invalid", f"{label} 包含非 JSON 值")
+
+
 def _resolved_file(path: Path, root: Path, *, label: str) -> Path:
     try:
         resolved_root = root.resolve(strict=True)
@@ -247,7 +272,10 @@ def _load_manifest(skill_directory: Path, source_root: Path) -> tuple[SkillToolD
         parameters = tool["parameters"]
         if not isinstance(parameters, Mapping) or any(not isinstance(key, str) for key in parameters):
             raise _error("skill_manifest_invalid", f"{label}.parameters 必须是字符串键映射")
-        schema = dict(cast(Mapping[str, Any], parameters))
+        schema = cast(
+            dict[str, Any],
+            _json_value(parameters, label=f"{label}.parameters"),
+        )
         try:
             Draft202012Validator.check_schema(schema)
         except SchemaError as exc:

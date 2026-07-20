@@ -227,6 +227,18 @@ tools:
     timeout_seconds: 30
     script: ../outside.py
 """,
+        """version: 1
+tools:
+  - name: example_tool
+    description: Example tool
+    parameters:
+      type: object
+      properties:
+        1: {type: string}
+    category: command
+    timeout_seconds: 30
+    script: tools/example_tool.py
+""",
     ],
 )
 def test_rejects_invalid_directory_manifests(

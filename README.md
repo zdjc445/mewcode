@@ -222,6 +222,60 @@ Path.cwd() / ".mewcode" / "notes.md"
 
 笔记命令不进入普通历史，清空必须经过确认。应用不会自动清空笔记。
 
+## Skills
+
+Skill 把严格元数据、Markdown SOP 和可选的 Python 工具组织成按需加载的能力包。来源优先级固定为：
+
+1. 项目级：`Path.cwd() / ".mewcode" / "skills"`
+2. 用户级：`Path.home() / ".mewcode-agent" / "skills"`
+3. 内置：Python 包中的 `mewcode_agent/builtin_skills`
+
+同名 Skill 由高优先级来源完整覆盖。支持直接子文件 `<name>.md` 和目录 `<name>/SKILL.md`；单个无效候选会被跳过并输出脱敏诊断，高优先级候选无效时允许低优先级同名候选生效。最终生效 Skill 引用不存在的工具、专属工具重名或命令名冲突时，应用拒绝启动。
+
+Skill 文档必须使用以下精确 frontmatter：
+
+```markdown
+---
+name: example
+description: 一句话说明
+allowed_tools:
+  - read_file
+execution_mode: shared
+model: inherit
+context_strategy: current
+recent_messages: null
+---
+# SOP
+
+这里是加载后才发送给模型的完整操作步骤。
+```
+
+`name` 必须匹配 `[a-z][a-z0-9-]*`；字段不能缺失，也不能增加未知字段。`shared` 只能使用 `current`；`isolated` 可以使用 `summary`、`recent` 或 `none`，其中 `recent` 必须提供正整数 `recent_messages`。当前版本的 `model` 只接受 `inherit`。
+
+启动 Prompt 只公开 Skill 的 `name` 和 `description`。Agent 需要使用 Skill 时调用系统工具 `load_skill`，完整 SOP 才会固定到当前环境上下文；它不写入普通消息历史或会话 JSONL。多个 shared Skill 同时激活时，可见工具是各自 `allowed_tools` 的交集，并始终保留 `load_skill`。工具可见性不会绕过路径沙箱、安全规则或审批。
+
+isolated Skill 使用独立历史和运行时，只把最终响应作为工具结果回流。`summary` 通过禁止工具的现有摘要器携带完整历史摘要，`recent` 携带最近 N 条并保持工具事务完整，`none` 不携带主历史。隔离执行遇到新的工具确认请求时固定拒绝该次调用；已经被安全策略、会话规则或永久规则允许的调用正常执行。
+
+目录 Skill 可以额外提供严格的 `tools.yaml`：
+
+```yaml
+version: 1
+tools:
+  - name: example_tool
+    description: 一句话说明
+    parameters:
+      type: object
+      properties: {}
+      additionalProperties: false
+    category: command
+    timeout_seconds: 30
+    script: tools/example_tool.py
+```
+
+专属工具名必须匹配 `[a-z][a-z0-9_]{0,63}`。脚本以当前 Python 解释器作为无 shell 子进程运行，cwd 固定为 Skill 目录，从 stdin 读取一个 UTF-8 JSON object，并向 stdout 写出一个完整 JSON value。扫描、帮助和激活不会执行脚本；实际调用必须先通过参数 schema、当前 Skill 白名单和现有 `command` 权限审批。stderr、traceback 和脚本源码不会回传模型。
+
+内置样板包括 shared `commit`、isolated recent `review` 和 isolated summary `test`。每个生效 Skill 自动注册 `/<name> [arguments]`；执行前会重新读取源文件以应用 SOP 和工具热更新。新增、删除、重命名或覆盖关系变化需要执行 `/skills rescan`。
+
 ## 斜杠命令
 
 所有 `/` 前缀输入先进入集中式命令注册中心。命令名是第一个 ASCII 空格前的部分，按小写解析，因此 `/HELP`、`/Help` 和 `/help` 等价；参数原文不转换大小写、路径或标识符。未知命令不会发送给模型，统一引导使用 `/help`。
@@ -231,7 +285,10 @@ Path.cwd() / ".mewcode" / "notes.md"
 | `/help [command]` | `/h`、`/?` | 显示命令总览或单条命令的元数据和用法 |
 | `/status` | `/stat` | 显示模型、模式、会话、Prompt Token 估值、笔记和权限状态 |
 | `/mode [plan\|execute]` | 无 | 查看或切换后续普通消息的默认模式 |
-| `/review [scope]` | `/code-review` | 把固定只读代码审查提示送入 Agent |
+| `/skills [show <name>\|rescan]` | 无 | 查看 Skill、显示脱敏详情或原子重新扫描 |
+| `/commit [arguments]` | 无 | 加载内置或被覆盖的 shared 提交 Skill |
+| `/review [arguments]` | 无 | 加载内置或被覆盖的 isolated 代码审查 Skill |
+| `/test [arguments]` | 无 | 加载内置或被覆盖的 isolated 测试 Skill |
 | `/compact` | `/compress` | 手动执行上下文压缩 |
 | `/clear` | `/new` | 保留旧会话存档并切换到新的 lazy 空会话 |
 | `/sessions` | 无 | 列出当前项目的已保存会话 |
@@ -242,7 +299,7 @@ Path.cwd() / ".mewcode" / "notes.md"
 
 `/permissions strict`、`/permissions default` 和 `/permissions permissive` 只覆盖当前应用进程中未命中规则的默认处理，`/permissions reset` 恢复启动配置。它不会写入安全 YAML 或永久审批文件，也不能绕过内置危险操作拒绝、路径沙箱或显式安全规则。
 
-`/review` 固定以 execute 方式运行，让 Agent 可以直接给出审查结果，但不会改变状态栏中的默认模式；其工具调用仍经过完整安全策略。
+所有动态 Skill 命令固定以 execute 方式发送统一合成请求，但不会改变状态栏中的默认模式。Chapter 08 的 `/code-review` 兼容别名已经移除；自定义 Skill 也会按精确 `name` 出现在帮助和补全中。
 
 输入框中只有一个公开命令前缀匹配时，Tab 会直接补全；多个匹配时弹出可用 Up、Down、Enter 和 Escape 操作的候选列表。隐藏命令不参与帮助、状态栏提示或补全。状态栏持续显示 `mode=plan|execute` 和 `/help /status /compact`。
 
@@ -283,7 +340,9 @@ uv run python -m compileall -q src tests integration_tests
 - 支持项目级优先的两层 Markdown 指令和受限 `@include`。
 - 支持用户级与项目级分流的自动笔记、查看、定位和确认清空。
 - 支持集中式斜杠命令注册、别名冲突检查、大小写不敏感分发、帮助和 Tab 补全。
-- 支持本地状态、进程内权限模式覆盖和预设代码审查工作流。
+- 支持项目、用户、内置三层 Skill，按需加载 SOP、最小工具白名单、shared/isolated 执行和动态命令。
+- 支持目录 Skill 的严格 JSON Schema 与无 shell Python 子进程工具协议。
+- 支持本地状态和进程内权限模式覆盖。
 - 内置 `read_file`、`write_file`、`edit_file`、`run_command`、`find_files`、`search_code` 和会话限定的 `read_context_artifact`。
 - 支持通过 stdio 或 Streamable HTTP 发现并复用 MCP 远端工具；当前只实现 MCP Tools，不实现 Resources、Prompts、OAuth 或 Tasks。
 - 每次用户请求最多执行 `15` 个模型轮；工具结果会立即写入对话历史并回灌模型，直到模型返回最终文本。

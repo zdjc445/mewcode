@@ -107,7 +107,15 @@ class IsolatedSkillExecutor:
                 "skill_isolated_failed",
                 "只有 isolated Skill 可以使用隔离执行器",
             )
-        prefix, messages = await self._context_input(definition)
+        try:
+            prefix, messages = await self._context_input(definition)
+        except SkillConfigError:
+            raise
+        except Exception as exc:
+            raise SkillConfigError(
+                "skill_isolated_failed",
+                "隔离 Skill 上下文准备失败",
+            ) from exc
         history = ConversationHistory()
         history.restore(messages)
         isolated_prompt_runtime = self._prompt_runtime.fork()

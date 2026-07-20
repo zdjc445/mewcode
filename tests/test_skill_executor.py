@@ -12,7 +12,7 @@ from mewcode_agent.agent.events import ToolApprovalRequestedEvent
 from mewcode_agent.agent.tool_scheduler import ToolScheduler
 from mewcode_agent.compaction import ContextSummarizer
 from mewcode_agent.history import ConversationHistory
-from mewcode_agent.models import ToolCall
+from mewcode_agent.models import ChatMessage, ToolCall
 from mewcode_agent.prompting.composer import PromptComposer
 from mewcode_agent.prompting.environment import (
     GitEnvironment,
@@ -29,6 +29,7 @@ from mewcode_agent.providers.base import (
     ProviderRequest,
     ProviderStreamEvent,
     ProviderTextDelta,
+    ProviderToolCall,
     ProviderTurnEnd,
     ProviderUsageEvent,
     ProviderUsageResult,
@@ -37,6 +38,7 @@ from mewcode_agent.skills import (
     IsolatedSkillExecutor,
     LoadSkillTool,
     SkillCatalog,
+    SkillConfigError,
     SkillRuntime,
     reject_isolated_approval,
     scan_skill_catalog,
@@ -116,6 +118,18 @@ def completed_response(text: str) -> tuple[ProviderStreamEvent, ...]:
     )
 
 
+def tool_call_response(
+    call: ToolCall,
+) -> tuple[ProviderStreamEvent, ...]:
+    return (
+        ProviderToolCall(call),
+        ProviderUsageEvent(
+            ProviderUsageResult("unavailable", None, "test_usage")
+        ),
+        ProviderTurnEnd("tool_calls"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_isolated_approval_handler_rejects_pending_request() -> None:
     context = AgentRunContext()
@@ -169,6 +183,21 @@ def build_executor(
             strategy=strategy,
             recent_messages=recent_messages,
         ),
+        encoding="utf-8",
+    )
+    (skill_root / "nested.md").write_text(
+        """---
+name: nested
+description: Nested shared skill
+allowed_tools:
+  - read_file
+execution_mode: shared
+model: inherit
+context_strategy: current
+recent_messages: null
+---
+NESTED SHARED SOP
+""",
         encoding="utf-8",
     )
     builtin_root = tmp_path / "builtin"
@@ -345,3 +374,71 @@ async def test_summary_strategy_uses_tool_free_summary_and_boundary_prefix(
         if hasattr(item, "role")
     ]
     assert "assistant detail" not in chat_content
+
+
+@pytest.mark.asyncio
+async def test_invalid_recent_history_returns_stable_isolated_error(
+    tmp_path: Path,
+) -> None:
+    history = ConversationHistory()
+    history.restore(
+        (
+            ChatMessage(
+                role="tool",
+                content="{}",
+                tool_call_id="orphan",
+            ),
+        )
+    )
+    provider = ScriptedProvider([completed_response("unused")])
+    runtime, _ = build_executor(
+        tmp_path,
+        strategy="recent",
+        recent_messages="1",
+        provider=provider,
+        main_history=history,
+    )
+
+    with pytest.raises(SkillConfigError) as caught:
+        await runtime.load("isolated", "")
+
+    assert caught.value.code == "skill_isolated_failed"
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_nested_load_skill_binds_to_isolated_runtime_only(
+    tmp_path: Path,
+) -> None:
+    history = ConversationHistory()
+    provider = ScriptedProvider(
+        [
+            tool_call_response(
+                ToolCall(
+                    "nested_call",
+                    "load_skill",
+                    '{"name":"nested","arguments":"nested arg"}',
+                )
+            ),
+            completed_response("nested result"),
+        ]
+    )
+    runtime, _ = build_executor(
+        tmp_path,
+        strategy="none",
+        recent_messages="null",
+        provider=provider,
+        main_history=history,
+    )
+
+    result = await runtime.load("isolated", "")
+
+    assert result["result"] == "nested result"
+    assert runtime.active_skills == ()
+    second_request_text = "\n".join(
+        item.content
+        for item in provider.requests[1].items
+        if hasattr(item, "content")
+    )
+    assert "NESTED SHARED SOP" in second_request_text
+    assert "nested arg" in second_request_text
