@@ -352,7 +352,7 @@ Worker 使用独立历史、权限临时状态、文件已读缓存和 Token 统
 
 ## Git Worktree 隔离
 
-受管目录固定为主 Git worktree 的 `.mewcode/.worktrees/`，状态固定写入 common Git dir 的 `mewcode-agent/worktrees.json`。名称最多四段，每段精确匹配 `[a-z][a-z0-9_-]{0,31}`；路径和分支只由规范名称计算，不接受任意目录或 branch。应用只把 `/.mewcode/.worktrees/` 加入 common Git `info/exclude`，不会修改 tracked `.gitignore`。
+受管目录固定为主 Git worktree 的 `.mewcode/.worktrees/`，状态固定写入 common Git dir 的 `mewcode-agent/worktrees.json`。名称最多四段，普通段精确匹配 `[a-z][a-z0-9_-]{0,31}`；系统生成的 `worker/<32hex task_id>` 是唯一的数字开头例外。路径和分支只由规范名称计算，不接受任意目录或 branch。应用只把 `/.mewcode/.worktrees/` 加入 common Git `info/exclude`，不会修改 tracked `.gitignore`。
 
 用户配置只从 `Path.home() / ".mewcode-agent" / "worktrees.yaml"` 读取；不存在时使用以下内存默认值且不创建文件：
 
@@ -372,6 +372,26 @@ copy_ignored: []
 
 手动命令为 `/worktrees`、`/worktree create <name>`、`/worktree enter <name>`、`/worktree exit`、`/worktree status [name]`、`/worktree delete <name>` 和 `/worktree delete <name> --discard`。`--discard` 会显示 dirty/unpushed 摘要并要求破坏性确认。enter/exit 会正常退出当前 TUI、完整关闭 Worker/Worktree/Notes/Hook/Session/MCP/artifact runtime，再在同一 Python 进程中以目标目录重新 bootstrap；启动命令可加唯一可选参数 `--resume` 恢复状态中的 active worktree。完整契约见 [`docs/ch12/spec.md`](docs/ch12/spec.md)。
 
+## 持久 Team 协作
+
+Team 在同一 Git 仓库中保存稳定成员身份、append-only mailbox、成对成员历史和共享 task DAG。运行时同时最多有一个 `active` 或 `paused` Team；同一仓库可以保留多个 `closed`/`merged` Team。状态位于 common Git dir 的 `mewcode-agent/teams.json`，mailbox 与 history 位于相邻的 `mewcode-agent/teams/<team_id>/`。应用不会自动删除或重写这些文件，也不会自动删除 Team 的 worker/integration worktree。
+
+用户配置只从 `Path.home() / ".mewcode-agent" / "teams.yaml"` 读取；不存在时使用以下内存默认值：
+
+```yaml
+version: 1
+max_teams: 8
+max_members_per_team: 8
+max_tasks_per_team: 256
+scheduler_interval_seconds: 1
+member_timeout_seconds: 900
+member_history_messages: 40
+```
+
+主 Agent 通过 `team_create`、`team_task`、`team_message`、`team_status` 和 `team_integrate` 管理 Team。成员复用现有 Worker 角色，但角色必须声明 `isolation: worktree`；每个成员一次只执行一个 task，ready task 按创建时间/ID、idle member 按名称确定性分配。成员看不到 `spawn_worker` 或任何 `team_*` 管理工具。运行中的 task 在进程重启后固定转为 `failed/team_member_interrupted`，不会猜测或接管旧进程。
+
+每个 Team 有独立 integration worktree。`team_integrate` 只把已完成且 clean 的 task branch 合入 integration；`/team merge --into-main` 先生成 preview 并要求破坏性确认，再让 integration 吸收当前 main，最后用 `--ff-only` 更新主工作树。任何冲突都会尝试 `merge --abort` 并保留 worktree；整个流程不会 push、创建 PR、reset、clean 或自动删除数据。当前 backend 是同进程 Worker 适配器；跨进程 tmux/Windows pane backend 留待后续，因为项目尚无无 UI Agent 子进程入口。完整契约见 [`docs/ch13/spec.md`](docs/ch13/spec.md)。
+
 ## 斜杠命令
 
 所有 `/` 前缀输入先进入集中式命令注册中心。命令名是第一个 ASCII 空格前的部分，按小写解析，因此 `/HELP`、`/Help` 和 `/help` 等价；参数原文不转换大小写、路径或标识符。未知命令不会发送给模型，统一引导使用 `/help`。
@@ -386,6 +406,8 @@ copy_ignored: []
 | `/worker <show\|cancel> <task_id>` | 无 | 显示或确认终止一个 Worker 任务 |
 | `/worktrees` | 无 | 列出受管 worktree 与实时安全状态 |
 | `/worktree <create\|enter\|exit\|status\|delete> ...` | 无 | 管理、切换或经保护删除 Git worktree |
+| `/teams` | 无 | 列出当前 Git 项目保存的 Team 摘要 |
+| `/team <show\|pause\|resume\|close\|merge> ...` | 无 | 查看、暂停、恢复、确认关闭或确认合并 Team |
 | `/commit [arguments]` | 无 | 加载内置或被覆盖的 shared 提交 Skill |
 | `/review [arguments]` | 无 | 加载内置或被覆盖的 isolated 代码审查 Skill |
 | `/test [arguments]` | 无 | 加载内置或被覆盖的 isolated 测试 Skill |
@@ -443,6 +465,7 @@ uv run python -m compileall -q src tests integration_tests
 - 支持项目、用户、内置三层 Skill，按需加载 SOP、最小工具白名单、shared/isolated 执行和动态命令。
 - 支持四层 Worker 角色、定义式/Fork 子工作者、前后台无损切换、独立状态与下一请求终态通知。
 - 支持受管 Git linked worktree、Worker ContextVar 目录隔离、手动 runtime rebuild、`--resume` 和 fail-closed 删除保护。
+- 支持持久 Team 身份、mailbox、成员历史、共享 task DAG、确定性 Lead 调度和安全 integration/main merge。
 - 支持目录 Skill 的严格 JSON Schema 与无 shell Python 子进程工具协议。
 - 支持两层声明式 Hook、生命周期事件、同步/异步动作、Prompt 注入、HTTP、shell 和工具拒绝拦截。
 - 支持本地状态和进程内权限模式覆盖。

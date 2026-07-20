@@ -70,6 +70,7 @@ class FakeWorktrees:
         self.heads: dict[str, str] = {}
         self.dirty: set[str] = set()
         self.reason_codes: dict[str, str] = {}
+        self.protected: set[str] = set()
 
     def list_records(self) -> tuple[WorktreeRecord, ...]:
         return tuple(self.records[name] for name in sorted(self.records))
@@ -116,6 +117,11 @@ class FakeWorktrees:
             not dirty and head == record.base_head,
             self.reason_codes.get(name),
         )
+
+    async def protect(self, name: str) -> None:
+        if name not in self.records:
+            raise AssertionError(f"unknown worktree: {name}")
+        self.protected.add(name)
 
 
 class MergeGit(FakeGit):
@@ -201,6 +207,7 @@ class RecordingBackend:
         self.heads: dict[str, str] = {}
         self.workspaces: dict[str, Path] = {}
         self.branches: dict[str, str] = {}
+        self.worktree_manager: FakeWorktrees | None = None
 
     async def start(self, request: TeamBackendRequest) -> TeamBackendResult:
         self.requests.append(request)
@@ -208,11 +215,20 @@ class RecordingBackend:
         if self.blocked:
             await gate.wait()
         task_id = request.task.task_id
+        head = self.heads.get(task_id, HEAD)
+        if self.worktree_manager is not None and task_id not in self.workspaces:
+            created = await self.worktree_manager.create(
+                f"worker/{task_id}",
+                kind="worker",
+                owner_id=task_id,
+            )
+            self.workspaces[task_id] = created.record.path
+            self.branches[task_id] = created.record.branch
+            self.worktree_manager.heads[created.record.name] = head
         workspace = self.workspaces.get(
             task_id,
             (self.root / "workers" / task_id).resolve(),
         )
-        head = self.heads.get(task_id, HEAD)
         branch = self.branches.get(task_id, f"branch-{task_id}")
         if task_id in self.cancelled:
             return TeamBackendResult(
@@ -298,6 +314,7 @@ async def _open_manager(
     root.mkdir(exist_ok=True)
     common.mkdir(exist_ok=True)
     worktrees = FakeWorktrees(root)
+    backend.worktree_manager = worktrees
     manager = await TeamManager.open(
         root,
         TeamRuntimeConfig(),

@@ -59,6 +59,7 @@ class WorktreeManager:
         self._now = now
         self._operation_lock = asyncio.Lock()
         self._active_owners: set[str] = set()
+        self._protected_names: set[str] = set()
         self._cleanup_task: asyncio.Task[None] | None = None
         self._closed = False
         self._cleanup_diagnostics: dict[str, str] = {}
@@ -695,6 +696,30 @@ class WorktreeManager:
         async with self._operation_lock:
             self._active_owners.discard(owner_id)
 
+    async def protect(self, name: str) -> None:
+        try:
+            validate_worktree_name(name)
+        except ValueError as exc:
+            raise WorktreeError(
+                "worktree_name_invalid",
+                "Worktree 名称无效",
+            ) from exc
+        async with self._operation_lock:
+            state = self._load_state()
+            self._record(state, name)
+            self._protected_names.add(name)
+
+    async def unprotect(self, name: str) -> None:
+        try:
+            validate_worktree_name(name)
+        except ValueError as exc:
+            raise WorktreeError(
+                "worktree_name_invalid",
+                "Worktree 名称无效",
+            ) from exc
+        async with self._operation_lock:
+            self._protected_names.discard(name)
+
     async def activate(self, name: str) -> WorktreeSwitchResult:
         try:
             validate_worktree_name(name)
@@ -807,7 +832,7 @@ class WorktreeManager:
             if record.name == state.active_name or (
                 record.owner_id is not None
                 and record.owner_id in self._active_owners
-            ):
+            ) or record.name in self._protected_names:
                 self._cleanup_diagnostics[record.name] = "worktree_in_use"
                 continue
             try:
@@ -827,4 +852,5 @@ class WorktreeManager:
             await asyncio.gather(task, return_exceptions=True)
         self._cleanup_task = None
         self._active_owners.clear()
+        self._protected_names.clear()
         return WorktreeCloseResult(cancelled)

@@ -89,6 +89,14 @@ from mewcode_agent.skills import (
     reject_isolated_approval,
     scan_skill_catalog,
 )
+from mewcode_agent.teams import (
+    InProcessTeamBackend,
+    TeamCommandManager,
+    TeamConfigError,
+    TeamManager,
+    load_team_config,
+    team_tools,
+)
 from mewcode_agent.tools.registry import create_core_registry
 from mewcode_agent.workers import (
     HookSubagentLauncher,
@@ -188,6 +196,7 @@ async def _run_application_once(
     hook_lifecycle_started = False
     worker_manager: WorkerManager | None = None
     worktree_manager: WorktreeManager | None = None
+    team_manager: TeamManager | None = None
     try:
         session_environment = collect_session_environment(
             working_directory=working_directory
@@ -210,8 +219,9 @@ async def _run_application_once(
             working_directory,
             worktree_configuration,
         )
-        if worktree_manager.available:
-            worktree_manager.start_cleanup()
+        team_configuration = load_team_config(
+            user_config_directory / "teams.yaml"
+        )
         project_prompt_path = (
             working_directory / ".mewcode" / "prompts.yaml"
         )
@@ -315,6 +325,8 @@ async def _run_application_once(
                 "worker",
                 "worktrees",
                 "worktree",
+                "teams",
+                "team",
             )
         )
         builtin_skills = builtin_skill_root()
@@ -462,6 +474,25 @@ async def _run_application_once(
             provider_models=provider_models,
         )
         registry.register(spawn_worker_tool)
+        team_backend = InProcessTeamBackend(
+            catalog=worker_catalog,
+            manager=worker_manager,
+            registry=registry,
+            parent_provider_id=provider_config.provider_id,
+            provider_models=provider_models,
+            worktree_manager=worktree_manager,
+        )
+        team_manager = await TeamManager.open(
+            working_directory,
+            team_configuration,
+            catalog=worker_catalog,
+            backend=team_backend,
+            worktree_manager=worktree_manager,
+        )
+        for tool in team_tools(team_manager):
+            registry.register(tool)
+        if worktree_manager.available:
+            worktree_manager.start_cleanup()
         hook_subagent_launcher = HookSubagentLauncher(
             catalog=worker_catalog,
             manager=worker_manager,
@@ -497,31 +528,36 @@ async def _run_application_once(
         HookConfigError,
         WorkerConfigError,
         WorktreeConfigError,
+        TeamConfigError,
     ) as exc:
         try:
-            if worker_manager is not None:
-                await worker_manager.close()
+            if team_manager is not None:
+                await team_manager.close()
         finally:
             try:
-                if worktree_manager is not None:
-                    await worktree_manager.close()
+                if worker_manager is not None:
+                    await worker_manager.close()
             finally:
                 try:
-                    if hook_engine is not None:
-                        await hook_engine.close()
-                    elif hook_action_runner is not None:
-                        await hook_action_runner.close()
+                    if worktree_manager is not None:
+                        await worktree_manager.close()
                 finally:
                     try:
-                        if session_manager is not None:
-                            session_manager.close()
+                        if hook_engine is not None:
+                            await hook_engine.close()
+                        elif hook_action_runner is not None:
+                            await hook_action_runner.close()
                     finally:
                         try:
-                            if mcp_manager is not None:
-                                await mcp_manager.close()
+                            if session_manager is not None:
+                                session_manager.close()
                         finally:
-                            if artifact_store is not None:
-                                await artifact_store.close()
+                            try:
+                                if mcp_manager is not None:
+                                    await mcp_manager.close()
+                            finally:
+                                if artifact_store is not None:
+                                    await artifact_store.close()
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1, None
     try:
@@ -529,14 +565,15 @@ async def _run_application_once(
         assert hook_action_runner is not None
         assert worker_manager is not None
         assert worktree_manager is not None
+        assert team_manager is not None
 
-        async def worker_request_controls() -> tuple[
+        async def runtime_request_controls() -> tuple[
             RuntimeInstruction, ...
         ]:
             notifications = await worker_manager.take_notifications(
                 session_manager.active_session_id
             )
-            return tuple(
+            controls = tuple(
                 RuntimeInstruction(
                     f"runtime.workers.notification_{item.task_id}",
                     "context",
@@ -550,6 +587,29 @@ async def _run_application_once(
                 )
                 for item in notifications
             )
+            if not team_manager.available:
+                return controls
+            team_notifications = await team_manager.take_lead_notifications()
+            return (
+                *controls,
+                *(
+                    RuntimeInstruction(
+                        (
+                            "runtime.teams.notification_"
+                            f"{item['message_id']}"
+                        ),
+                        "context",
+                        "request",
+                        json.dumps(
+                            item,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        "team",
+                    )
+                    for item in team_notifications
+                ),
+            )
 
         agent_loop = AgentLoop(
             provider,
@@ -560,7 +620,7 @@ async def _run_application_once(
             context_window_manager=context_window_manager,
             visible_tool_names=skill_runtime.visible_tool_names,
             hook_engine=hook_engine,
-            request_control_provider=worker_request_controls,
+            request_control_provider=runtime_request_controls,
         )
         isolated_executor = IsolatedSkillExecutor(
             provider=provider,
@@ -626,6 +686,7 @@ async def _run_application_once(
         worktree_command_manager = WorktreeCommandManager(
             worktree_manager
         )
+        team_command_manager = TeamCommandManager(team_manager)
 
         async def session_switched(
             previous: str,
@@ -659,6 +720,7 @@ async def _run_application_once(
                 skill_command_manager.management_spec(),
                 *worker_command_manager.specs(),
                 *worktree_command_manager.specs(),
+                *team_command_manager.specs(),
             ),
         )
         skill_command_manager.bind_registry(command_registry)
@@ -677,6 +739,8 @@ async def _run_application_once(
         )
         await hook_lifecycle.start()
         hook_lifecycle_started = True
+        if team_manager.available:
+            team_manager.start()
         await app.run_async()
         return 0, app.restart_target
     finally:
@@ -688,27 +752,31 @@ async def _run_application_once(
         assert hook_engine is not None
         assert worker_manager is not None
         assert worktree_manager is not None
+        assert team_manager is not None
         try:
-            await worker_manager.close()
+            await team_manager.close()
         finally:
             try:
-                await worktree_manager.close()
+                await worker_manager.close()
             finally:
                 try:
-                    await notes_manager.flush_on_exit()
+                    await worktree_manager.close()
                 finally:
                     try:
-                        if hook_lifecycle_started and hook_lifecycle is not None:
-                            await hook_lifecycle.end_active_session()
-                        await hook_engine.close()
+                        await notes_manager.flush_on_exit()
                     finally:
                         try:
-                            session_manager.close()
+                            if hook_lifecycle_started and hook_lifecycle is not None:
+                                await hook_lifecycle.end_active_session()
+                            await hook_engine.close()
                         finally:
                             try:
-                                await mcp_manager.close()
+                                session_manager.close()
                             finally:
-                                await artifact_store.close()
+                                try:
+                                    await mcp_manager.close()
+                                finally:
+                                    await artifact_store.close()
 
 
 async def run_application(

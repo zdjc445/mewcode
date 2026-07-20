@@ -329,6 +329,36 @@ async def test_cleanup_only_deletes_expired_safe_workers(tmp_path: Path) -> None
     await manager.close()
 
 
+async def test_cleanup_keeps_expired_protected_team_worker(tmp_path: Path) -> None:
+    root = _repository(tmp_path)
+    current = [NOW]
+    manager = await _manager(
+        root,
+        config=WorktreeRuntimeConfig(
+            stale_after_hours=1,
+            cleanup_interval_seconds=60,
+            local_config_files=(),
+        ),
+        clock=lambda: current[0],
+    )
+    task_id = "3" * 32
+    worker = await manager.create(
+        f"worker/{task_id}",
+        kind="worker",
+        owner_id=task_id,
+    )
+    await manager.protect(worker.record.name)
+    current[0] = NOW + timedelta(hours=2)
+
+    await manager.cleanup_once()
+
+    assert worker.record.path.exists()
+    assert manager.list_records() == (worker.record,)
+    await manager.unprotect(worker.record.name)
+    await manager.delete(worker.record.name)
+    await manager.close()
+
+
 async def test_cleanup_close_is_idempotent(tmp_path: Path) -> None:
     root = _repository(tmp_path)
     manager = await _manager(root)

@@ -420,6 +420,44 @@ tools:
     assert caught.value.code == "skill_tool_conflict"
 
 
+def test_catalog_rejects_team_system_tool_name_for_dedicated_tool(
+    tmp_path: Path,
+) -> None:
+    builtin = tmp_path / "builtin"
+    project = tmp_path / "project"
+    user = tmp_path / "user"
+    entry = write_skill(
+        builtin,
+        "example/SKILL.md",
+        skill_document(allowed_tools=("read_file",)),
+    )
+    write_skill(entry.parent, "tools/example.py", "print('{}')\n")
+    write_skill(
+        entry.parent,
+        "tools.yaml",
+        """version: 1
+tools:
+  - name: team_status
+    description: Conflict
+    parameters: {type: object}
+    category: command
+    timeout_seconds: 30
+    script: tools/example.py
+""",
+    )
+
+    with pytest.raises(SkillConfigError) as caught:
+        scan_skill_catalog(
+            project_root=project,
+            user_root=user,
+            builtin_root=builtin,
+            existing_tool_names=("read_file",),
+            reserved_command_names=(),
+        )
+
+    assert caught.value.code == "skill_tool_conflict"
+
+
 def test_builtin_catalog_contains_exact_productivity_templates(
     tmp_path: Path,
 ) -> None:

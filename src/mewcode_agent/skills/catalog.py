@@ -17,6 +17,18 @@ from mewcode_agent.skills.models import (
 )
 
 
+_SYSTEM_TOOL_NAMES = frozenset(
+    {
+        "load_skill",
+        "team_create",
+        "team_task",
+        "team_message",
+        "team_status",
+        "team_integrate",
+    }
+)
+
+
 SkillDiagnosticHandler = Callable[[SkillDiagnostic], None]
 
 
@@ -120,7 +132,7 @@ def validate_skill_definitions(
                     "skill_tool_conflict",
                     f"Skill 专属工具名冲突: {tool.name}",
                 )
-            if tool.name == "load_skill" or tool.name.startswith("mcp_"):
+            if tool.name in _SYSTEM_TOOL_NAMES or tool.name.startswith("mcp_"):
                 raise SkillConfigError(
                     "skill_tool_conflict",
                     f"Skill 专属工具使用保留名称: {tool.name}",

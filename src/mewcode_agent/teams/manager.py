@@ -43,6 +43,7 @@ from mewcode_agent.worktrees import (
     GitRunner,
     WorktreeError,
     WorktreeManager,
+    WorktreeStatus,
     validate_object_id,
 )
 
@@ -357,6 +358,17 @@ class TeamManager:
 
     async def _recover_startup(self) -> None:
         _, lock_path, _, state = self._require_available()
+        for team in state.teams:
+            protected_names = [team.integration_worktree_name]
+            protected_names.extend(
+                f"worker/{task.task_id}"
+                for task in team.tasks
+                if task.workspace_path is not None
+            )
+            records = {item.name for item in self._worktree_manager.list_records()}
+            for name in protected_names:
+                if name in records:
+                    await self._worktree_manager.protect(name)
         active = None
         if state.active_team_id is not None:
             active = self._team(state, state.active_team_id)
@@ -806,6 +818,12 @@ class TeamManager:
                         result_state = "failed"
                     if cancellation_reason is None:
                         error_code = "team_backend_failed"
+                else:
+                    try:
+                        await self._worktree_manager.protect(f"worker/{task_id}")
+                    except WorktreeError:
+                        result_state = "failed"
+                        error_code = "team_backend_failed"
                 if result_state == "completed":
                     terminal = replace(
                         task,
@@ -948,6 +966,13 @@ class TeamManager:
                     "team_repository_unavailable",
                     "Team integration worktree 创建失败",
                 ) from exc
+            try:
+                await self._worktree_manager.protect(integration_name)
+            except WorktreeError as exc:
+                raise TeamError(
+                    "team_repository_unavailable",
+                    "Team integration worktree 保护失败",
+                ) from exc
             member_records = tuple(
                 sorted(
                     (
@@ -1010,6 +1035,22 @@ class TeamManager:
             if team_id is None:
                 return self._active_team(state)
             return self._team(state, team_id)
+
+    async def integration_status(self) -> WorktreeStatus:
+        async with self._operation_lock:
+            state = self._load_state()
+            team = self._active_team(state)
+            try:
+                status = await self._worktree_manager.status(
+                    team.integration_worktree_name
+                )
+            except WorktreeError as exc:
+                raise TeamError(
+                    "team_integration_unsafe",
+                    "无法读取 integration worktree 状态",
+                ) from exc
+            self._state = state
+            return status
 
     async def create_task(
         self,

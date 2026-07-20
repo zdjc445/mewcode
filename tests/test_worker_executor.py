@@ -319,6 +319,20 @@ def test_visible_tools_only_shrink_in_registry_order(tmp_path: Path) -> None:
     assert visible == frozenset({"read_file"})
 
 
+def test_visible_tools_always_remove_team_management_tools(
+    tmp_path: Path,
+) -> None:
+    visible = visible_worker_tools(
+        ("read_file", "team_status", "team_task", "spawn_worker"),
+        base_visible_tools=None,
+        definition=role(tmp_path),
+        background=False,
+        runtime_config=WorkerRuntimeConfig(),
+    )
+
+    assert visible == frozenset({"read_file"})
+
+
 @pytest.mark.parametrize(
     ("content", "valid"),
     [

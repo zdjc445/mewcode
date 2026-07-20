@@ -1,6 +1,7 @@
 """Persistent project Team collaboration."""
 
 from mewcode_agent.teams.backend import InProcessTeamBackend, TeamBackend
+from mewcode_agent.teams.commands import TeamCommandManager
 from mewcode_agent.teams.loader import load_team_config
 from mewcode_agent.teams.manager import TeamManager
 from mewcode_agent.teams.models import (
@@ -33,12 +34,21 @@ from mewcode_agent.teams.storage import (
     team_state_lock,
     write_team_state,
 )
+from mewcode_agent.teams.tools import (
+    TeamCreateTool,
+    TeamIntegrateTool,
+    TeamMessageTool,
+    TeamStatusTool,
+    TeamTaskTool,
+    team_tools,
+)
 
 __all__ = [
     "TeamBackendRequest",
     "TeamBackendResult",
     "TeamBackend",
     "TeamCloseResult",
+    "TeamCommandManager",
     "TeamConfigError",
     "TeamDependencyResult",
     "TeamError",
@@ -50,6 +60,11 @@ __all__ = [
     "TeamRecord",
     "TeamRuntimeConfig",
     "TeamTaskRecord",
+    "TeamCreateTool",
+    "TeamIntegrateTool",
+    "TeamMessageTool",
+    "TeamStatusTool",
+    "TeamTaskTool",
     "InProcessTeamBackend",
     "append_mailbox_message",
     "append_member_history",
@@ -59,6 +74,7 @@ __all__ = [
     "load_team_state",
     "team_state_data",
     "team_state_lock",
+    "team_tools",
     "validate_member_name",
     "validate_team_error_code",
     "validate_team_hex_id",

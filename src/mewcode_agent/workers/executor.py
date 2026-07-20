@@ -66,6 +66,15 @@ _FORK_HEADINGS = (
     "## Risks",
     "## Next Steps",
 )
+_TEAM_TOOL_NAMES = frozenset(
+    {
+        "team_create",
+        "team_task",
+        "team_message",
+        "team_status",
+        "team_integrate",
+    }
+)
 _WORKER_EXECUTION_ACTIVE: ContextVar[bool] = ContextVar(
     "mewcode_worker_execution_active",
     default=False,
@@ -118,6 +127,7 @@ def visible_worker_tools(
     )
     allowed = set(base)
     allowed.discard("spawn_worker")
+    allowed.difference_update(_TEAM_TOOL_NAMES)
     if definition is not None:
         if definition.allowed_tools is not None:
             allowed.intersection_update(definition.allowed_tools)
@@ -464,6 +474,10 @@ class WorkerExecutor:
         try:
             if self._hook_engine is not None:
                 await self._hook_engine.drain_project_root(path)
+            if spec.preserve_workspace:
+                await self._worktree_manager.protect(f"worker/{task_id}")
+        except WorktreeError as exc:
+            reason = exc.code
         except (OSError, RuntimeError, ValueError):
             reason = "worktree_status_failed"
         finally:
