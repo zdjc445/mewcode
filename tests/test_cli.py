@@ -70,6 +70,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
                 prompt_composer: object,
                 scheduler: object,
                 context_window_manager: object,
+                visible_tool_names: object,
         ) -> None:
             agent_loop_calls.append(
                 {
@@ -79,6 +80,7 @@ def test_cli_builds_and_runs_app_with_valid_config(
                         "prompt_composer": prompt_composer,
                         "scheduler": scheduler,
                         "context_window_manager": context_window_manager,
+                        "visible_tool_names": visible_tool_names,
                 }
             )
 
@@ -98,7 +100,10 @@ def test_cli_builds_and_runs_app_with_valid_config(
         "help",
         "status",
         "mode",
+        "skills",
+        "commit",
         "review",
+        "test",
         "compact",
         "clear",
         "sessions",
@@ -112,8 +117,10 @@ def test_cli_builds_and_runs_app_with_valid_config(
     assert isinstance(registry, ToolRegistry)
     assert registry.get("read_file") is not None
     assert registry.get("read_context_artifact") is not None
+    assert registry.get("load_skill") is not None
     assert agent_loop_calls[0]["scheduler"] is not None
     assert agent_loop_calls[0]["context_window_manager"] is not None
+    assert callable(agent_loop_calls[0]["visible_tool_names"])
     artifact_root = tmp_path / "home" / ".mewcode-agent" / "context-artifacts"
     assert artifact_root.is_dir()
     assert tuple(artifact_root.iterdir()) == ()
@@ -357,6 +364,7 @@ def test_cli_builds_prompt_dependencies_from_exact_two_layers(
             "prompt_composer",
             "scheduler",
             "context_window_manager",
+            "visible_tool_names",
         }
     composer = calls[0]["prompt_composer"]
     frame = composer.compose([], ())  # type: ignore[union-attr]

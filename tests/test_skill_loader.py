@@ -6,6 +6,7 @@ import pytest
 
 from mewcode_agent.skills import (
     SkillConfigError,
+    builtin_skill_root,
     load_skill_definition,
     scan_skill_catalog,
 )
@@ -405,3 +406,37 @@ tools:
         )
 
     assert caught.value.code == "skill_tool_conflict"
+
+
+def test_builtin_catalog_contains_exact_productivity_templates(
+    tmp_path: Path,
+) -> None:
+    snapshot = scan_skill_catalog(
+        project_root=tmp_path / "project",
+        user_root=tmp_path / "user",
+        builtin_root=builtin_skill_root(),
+        existing_tool_names=(
+            "read_file",
+            "find_files",
+            "search_code",
+            "run_command",
+        ),
+        reserved_command_names=("help", "skills"),
+    )
+
+    assert [item.name for item in snapshot.definitions] == [
+        "commit",
+        "review",
+        "test",
+    ]
+    assert [item.execution_mode for item in snapshot.definitions] == [
+        "shared",
+        "isolated",
+        "isolated",
+    ]
+    assert [item.context_strategy for item in snapshot.definitions] == [
+        "current",
+        "recent",
+        "summary",
+    ]
+    assert snapshot.definitions[1].recent_messages == 12

@@ -2,9 +2,7 @@
 
 from mewcode_agent.commands.controller import CommandController
 from mewcode_agent.commands.builtins import (
-    REVIEW_DEFAULT_PROMPT,
-    REVIEW_SCOPED_PREFIX,
-    REVIEW_SCOPED_SUFFIX,
+    BUILTIN_COMMAND_KEYS,
     BuiltinCommandServices,
     PermissionCommandPaths,
     build_builtin_command_registry,
@@ -33,6 +31,7 @@ from mewcode_agent.commands.registry import CommandRegistry
 __all__ = [
     "COMMAND_CATEGORIES",
     "BuiltinCommandServices",
+    "BUILTIN_COMMAND_KEYS",
     "CommandCategory",
     "CommandController",
     "CommandDispatchResult",
@@ -51,9 +50,6 @@ __all__ = [
     "ConfirmationRequest",
     "PermissionCommandPaths",
     "ParsedCommandLine",
-    "REVIEW_DEFAULT_PROMPT",
-    "REVIEW_SCOPED_PREFIX",
-    "REVIEW_SCOPED_SUFFIX",
     "build_builtin_command_registry",
     "parse_command_line",
 ]

@@ -29,8 +29,6 @@ from mewcode_agent.agent.context import AgentRunCancelled
 import mewcode_agent.app as app_module
 from mewcode_agent.app import ChatApp
 from mewcode_agent.commands import (
-    REVIEW_SCOPED_PREFIX,
-    REVIEW_SCOPED_SUFFIX,
     BuiltinCommandServices,
     PermissionCommandPaths,
     build_builtin_command_registry,
@@ -527,11 +525,11 @@ async def test_tab_single_match_completes_and_multiple_matches_open_popup(
 
     async with app.run_test() as pilot:
         prompt_input = app.query_one("#prompt-input", Input)
-        prompt_input.value = "/rev"
+        prompt_input.value = "/clea"
         prompt_input.cursor_position = len(prompt_input.value)
         await pilot.press("tab")
         await pilot.pause()
-        assert prompt_input.value == "/review "
+        assert prompt_input.value == "/clear "
 
         prompt_input.value = "/s"
         prompt_input.cursor_position = len(prompt_input.value)
@@ -546,38 +544,6 @@ async def test_tab_single_match_completes_and_multiple_matches_open_popup(
             "/sessions ",
             "/session ",
         }
-
-
-@pytest.mark.asyncio
-async def test_review_command_uses_execute_without_changing_default_mode(
-    tmp_path: Path,
-) -> None:
-    loop = GatedAgentLoop()
-    history = ConversationHistory()
-    app = make_builtin_app(tmp_path, loop, history)
-
-    async with app.run_test() as pilot:
-        prompt_input = app.query_one("#prompt-input", Input)
-        plan_switch = app.query_one("#plan-only-switch", Switch)
-        plan_switch.value = True
-        prompt_input.value = "/review Src/ExactName.py"
-        await pilot.press("enter")
-        await loop.started.wait()
-
-        assert loop.plan_only_values == [False]
-        assert plan_switch.value is True
-        assert history.snapshot()[0] == ChatMessage(
-            role="user",
-            content=(
-                REVIEW_SCOPED_PREFIX
-                + "Src/ExactName.py"
-                + REVIEW_SCOPED_SUFFIX
-            ),
-        )
-
-        loop.release.set()
-        await app.workers.wait_for_complete()
-        assert plan_switch.value is True
 
 
 @pytest.mark.asyncio

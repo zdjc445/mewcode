@@ -13,6 +13,8 @@ class CommandRegistry:
     def __init__(self) -> None:
         self._specs: list[CommandSpec] = []
         self._lookup: dict[str, CommandSpec] = {}
+        self._fixed_specs: tuple[CommandSpec, ...] = ()
+        self._dynamic_specs: tuple[CommandSpec, ...] = ()
         self._frozen = False
 
     @property
@@ -33,7 +35,40 @@ class CommandRegistry:
             self._lookup[key] = spec
 
     def freeze(self) -> None:
+        if self._frozen:
+            return
+        self._fixed_specs = tuple(self._specs)
         self._frozen = True
+
+    def validate_dynamic(self, specs: tuple[CommandSpec, ...]) -> None:
+        self._build_dynamic_state(specs)
+
+    def replace_dynamic(self, specs: tuple[CommandSpec, ...]) -> None:
+        replacement_specs, replacement_lookup = self._build_dynamic_state(
+            specs
+        )
+        self._dynamic_specs = specs
+        self._specs = list(replacement_specs)
+        self._lookup = replacement_lookup
+
+    def _build_dynamic_state(
+        self,
+        specs: tuple[CommandSpec, ...],
+    ) -> tuple[tuple[CommandSpec, ...], dict[str, CommandSpec]]:
+        if not self._frozen:
+            raise CommandRegistrationError("动态命令只能在注册中心冻结后替换")
+        if not isinstance(specs, tuple) or any(
+            not isinstance(spec, CommandSpec) for spec in specs
+        ):
+            raise CommandRegistrationError("动态命令 specs 类型无效")
+        combined = (*self._fixed_specs, *specs)
+        lookup: dict[str, CommandSpec] = {}
+        for spec in combined:
+            for key in (spec.name, *spec.aliases):
+                if key in lookup:
+                    raise CommandRegistrationError(f"命令 key 冲突：{key}")
+                lookup[key] = spec
+        return combined, lookup
 
     def resolve(self, name: str) -> CommandSpec | None:
         if not isinstance(name, str):
@@ -66,4 +101,3 @@ class CommandRegistry:
             for spec in self._specs
             if not spec.hidden and spec.status_hint
         )
-

@@ -176,3 +176,42 @@ def test_freeze_is_idempotent_and_rejects_later_registration() -> None:
     assert registry.frozen is True
     assert registry.resolve("help") is not None
 
+
+def test_dynamic_commands_replace_atomically_after_freeze() -> None:
+    registry = CommandRegistry()
+    fixed = make_spec("help")
+    first = make_spec("alpha", category="workflow")
+    second = make_spec("beta", category="workflow")
+    registry.register(fixed)
+    registry.freeze()
+
+    registry.replace_dynamic((first,))
+    assert registry.resolve("alpha") is first
+    assert registry.public_specs() == (fixed, first)
+
+    registry.replace_dynamic((second,))
+    assert registry.resolve("alpha") is None
+    assert registry.resolve("beta") is second
+    assert registry.public_specs() == (fixed, second)
+
+
+def test_dynamic_command_conflict_validation_has_zero_mutation() -> None:
+    registry = CommandRegistry()
+    fixed = make_spec("help", aliases=("h",))
+    current = make_spec("alpha")
+    registry.register(fixed)
+    registry.freeze()
+    registry.replace_dynamic((current,))
+
+    with pytest.raises(CommandRegistrationError, match="h"):
+        registry.validate_dynamic((make_spec("beta", aliases=("h",)),))
+
+    assert registry.resolve("alpha") is current
+    assert registry.resolve("beta") is None
+
+
+def test_dynamic_commands_require_frozen_registry() -> None:
+    registry = CommandRegistry()
+
+    with pytest.raises(CommandRegistrationError, match="冻结"):
+        registry.replace_dynamic((make_spec("alpha"),))

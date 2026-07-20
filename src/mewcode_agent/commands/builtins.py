@@ -30,20 +30,6 @@ from mewcode_agent.sessions import (
 )
 
 
-REVIEW_DEFAULT_PROMPT = (
-    "请审查当前工作区尚未提交的代码更改。只读取和分析，不修改文件。"
-    "请按严重程度列出可复现的问题，并给出精确文件与行号；"
-    "如果没有发现问题，请明确说明剩余测试风险。"
-)
-REVIEW_SCOPED_PREFIX = (
-    "请审查以下用户指定范围内的代码。只读取和分析，不修改文件。\n"
-    "用户指定范围（原文）：\n"
-)
-REVIEW_SCOPED_SUFFIX = (
-    "\n请按严重程度列出可复现的问题，并给出精确文件与行号；"
-    "如果没有发现问题，请明确说明剩余测试风险。"
-)
-
 _CATEGORY_TITLES = {
     "general": "常用",
     "workflow": "工作流",
@@ -52,6 +38,28 @@ _CATEGORY_TITLES = {
     "memory": "记忆",
     "security": "权限",
 }
+
+BUILTIN_COMMAND_KEYS = frozenset(
+    {
+        "help",
+        "h",
+        "?",
+        "status",
+        "stat",
+        "mode",
+        "compact",
+        "compress",
+        "clear",
+        "new",
+        "sessions",
+        "resume",
+        "session",
+        "memory",
+        "notes",
+        "permissions",
+        "perms",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,23 +475,10 @@ class _BuiltinHandlers:
         )
         await ui.show_system_message(tuple(lines))
 
-    async def review(
-        self,
-        invocation: CommandInvocation,
-        ui: CommandUI,
-    ) -> None:
-        prompt = (
-            REVIEW_DEFAULT_PROMPT
-            if not invocation.arguments
-            else REVIEW_SCOPED_PREFIX
-            + invocation.arguments
-            + REVIEW_SCOPED_SUFFIX
-        )
-        await ui.send_user_message(prompt, mode="execute")
-
-
 def build_builtin_command_registry(
     services: BuiltinCommandServices,
+    *,
+    extra_specs: tuple[CommandSpec, ...] = (),
 ) -> CommandRegistry:
     if not isinstance(services, BuiltinCommandServices):
         raise ValueError("services 类型无效")
@@ -521,16 +516,6 @@ def build_builtin_command_registry(
             "workflow",
             "精确小写 plan 或 execute",
             handlers.mode,
-        ),
-        CommandSpec(
-            "review",
-            ("code-review",),
-            "让 Agent 只读审查代码",
-            "/review [scope]",
-            "agent",
-            "workflow",
-            "可选的用户指定审查范围原文",
-            handlers.review,
         ),
         CommandSpec(
             "compact",
@@ -605,6 +590,15 @@ def build_builtin_command_registry(
         ),
     )
     for spec in specs:
+        registry.register(spec)
+    actual_builtin_keys = frozenset(
+        key for spec in specs for key in (spec.name, *spec.aliases)
+    )
+    if actual_builtin_keys != BUILTIN_COMMAND_KEYS:
+        raise CommandError("command_registry_invalid")
+    if not isinstance(extra_specs, tuple):
+        raise ValueError("extra_specs 必须是 tuple")
+    for spec in extra_specs:
         registry.register(spec)
     if registry.status_hints() != ("/help", "/status", "/compact"):
         raise CommandError("command_registry_invalid")

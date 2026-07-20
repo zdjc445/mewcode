@@ -25,6 +25,7 @@ from mewcode_agent.skills.executor import (
     IsolatedSkillExecutor,
     reject_isolated_approval,
 )
+from mewcode_agent.skills.commands import SkillCommandManager
 
 __all__ = [
     "SKILL_NAME_PATTERN",
@@ -41,6 +42,7 @@ __all__ = [
     "SkillRuntime",
     "IsolatedSkillExecutor",
     "reject_isolated_approval",
+    "SkillCommandManager",
     "builtin_skill_root",
     "load_skill_definition",
     "scan_skill_catalog",

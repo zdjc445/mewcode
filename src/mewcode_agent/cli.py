@@ -17,6 +17,7 @@ from mewcode_agent.compaction import (
     ToolResultCompactor,
 )
 from mewcode_agent.commands import (
+    BUILTIN_COMMAND_KEYS,
     BuiltinCommandServices,
     PermissionCommandPaths,
     build_builtin_command_registry,
@@ -65,6 +66,18 @@ from mewcode_agent.sessions import (
     SessionManager,
     SessionRecovery,
 )
+from mewcode_agent.skills import (
+    IsolatedSkillExecutor,
+    LoadSkillTool,
+    SkillCatalog,
+    SkillCommandManager,
+    SkillConfigError,
+    SkillDiagnostic,
+    SkillRuntime,
+    builtin_skill_root,
+    reject_isolated_approval,
+    scan_skill_catalog,
+)
 from mewcode_agent.tools.registry import create_core_registry
 
 CONFIG_FILENAME = "llm_providers.yaml"
@@ -84,6 +97,17 @@ def _print_note_warning(warning: NoteWarning) -> None:
     scope = warning.scope if warning.scope is not None else "all"
     print(
         f"笔记警告：scope={scope} code={warning.code}",
+        file=sys.stderr,
+    )
+
+
+def _print_skill_diagnostic(diagnostic: SkillDiagnostic) -> None:
+    print(
+        "Skill 警告："
+        f"source={diagnostic.source} "
+        f"candidate={diagnostic.candidate} "
+        f"code={diagnostic.code} "
+        f"{diagnostic.message}",
         file=sys.stderr,
     )
 
@@ -197,6 +221,26 @@ async def run_application() -> int:
             diagnostic_handler=_print_mcp_diagnostic,
         )
         await mcp_manager.activate_all()
+        reserved_command_names = frozenset(
+            (*BUILTIN_COMMAND_KEYS, "skills")
+        )
+        builtin_skills = builtin_skill_root()
+        skill_snapshot = scan_skill_catalog(
+            project_root=working_directory,
+            user_root=user_config_directory,
+            builtin_root=builtin_skills,
+            existing_tool_names=registry.tool_names(),
+            reserved_command_names=reserved_command_names,
+            diagnostic_handler=_print_skill_diagnostic,
+        )
+        skill_runtime = SkillRuntime(
+            SkillCatalog(skill_snapshot),
+            registry,
+            prompt_runtime,
+            reserved_command_names=reserved_command_names,
+        )
+        load_skill_tool = LoadSkillTool(skill_runtime)
+        registry.register(load_skill_tool)
         security_boundary = registry.security_boundary
         assert security_boundary is not None
         security_policy = SecurityPolicyEngine(
@@ -209,17 +253,18 @@ async def run_application() -> int:
             policy_engine=security_policy,
         )
         loop_config = AgentLoopConfig()
+        context_summarizer = ContextSummarizer(
+            provider,
+            timeout_seconds=loop_config.llm_timeout_seconds,
+            config=compaction_config,
+        )
         context_window_manager = ContextWindowManager(
             provider,
             ToolResultCompactor(
                 artifact_store,
                 config=compaction_config,
             ),
-            ContextSummarizer(
-                provider,
-                timeout_seconds=loop_config.llm_timeout_seconds,
-                config=compaction_config,
-            ),
+            context_summarizer,
             context_window_tokens=provider_config.context_window_tokens,
             max_tokens=provider_config.max_tokens,
             config=compaction_config,
@@ -236,6 +281,7 @@ async def run_application() -> int:
         ContextCompactionError,
         SessionError,
         NotesError,
+        SkillConfigError,
     ) as exc:
         try:
             if session_manager is not None:
@@ -257,7 +303,22 @@ async def run_application() -> int:
             prompt_composer=prompt_composer,
             scheduler=scheduler,
             context_window_manager=context_window_manager,
+            visible_tool_names=skill_runtime.visible_tool_names,
         )
+        isolated_executor = IsolatedSkillExecutor(
+            provider=provider,
+            registry=registry,
+            scheduler=scheduler,
+            prompt_runtime=prompt_runtime,
+            prompt_composer=prompt_composer,
+            skill_runtime=skill_runtime,
+            load_skill_tool=load_skill_tool,
+            main_history=history,
+            summarizer=context_summarizer,
+            approval_handler=reject_isolated_approval,
+            loop_config=loop_config,
+        )
+        skill_runtime.set_isolated_runner(isolated_executor.run)
         assert session_manager is not None
         assert notes_manager is not None
 
@@ -280,11 +341,23 @@ async def run_application() -> int:
             if gap is not None:
                 controls = (*controls, gap)
             agent_loop.reset_session(session_controls=controls)
+            skill_runtime.reset_session()
 
         def activate_new_session() -> None:
             agent_loop.reset_session(
                 session_controls=load_current_session_controls()
             )
+            skill_runtime.reset_session()
+
+        skill_command_manager = SkillCommandManager(
+            project_root=working_directory,
+            user_root=user_config_directory,
+            builtin_root=builtin_skills,
+            tool_registry=registry,
+            skill_runtime=skill_runtime,
+            reserved_command_names=reserved_command_names,
+            diagnostic_handler=_print_skill_diagnostic,
+        )
 
         command_registry = build_builtin_command_registry(
             BuiltinCommandServices(
@@ -302,7 +375,12 @@ async def run_application() -> int:
                 ),
                 activate_session,
                 activate_new_session,
-            )
+            ),
+            extra_specs=(skill_command_manager.management_spec(),),
+        )
+        skill_command_manager.bind_registry(command_registry)
+        command_registry.replace_dynamic(
+            skill_command_manager.dynamic_specs()
         )
 
         app = ChatApp(

@@ -24,6 +24,17 @@
 13. 每个生效 Skill 自动注册 `/<name> [arguments]`；管理命令固定为 `/skills`、`/skills show <name>` 和 `/skills rescan`。
 14. 每次执行 Skill 前重新读取其源文件；`/skills rescan` 重新扫描来源、重建目录和快捷命令。
 15. `/clear` 清空普通历史时同时清空已激活 Skill，不保留上一会话的 SOP。
+16. Chapter 08 的固定 `/review` 与 `/code-review` 迁移出内置命令表；`/review` 改由内置 `review` Skill 的动态快捷命令提供，`/code-review` 不再保留。
+
+## 2.1 与 Chapter 08 的兼容性变化
+
+Chapter 08 原先由固定 agent 命令把硬编码审查 Prompt 发送进主对话。本章实施后由以下规则替代：
+
+- 固定命令注册中心不再声明 `review` 或 `code-review`；
+- 内置 Skill catalog 声明规范名称 `review`，因此动态注册公开 `/review [arguments]`；
+- `/review` 首先发送统一 Skill 合成请求，再由 Agent 调用 `load_skill`；完整审查 SOP 在隔离 Prompt 环境中加载；
+- `/code-review` 成为未知命令并引导 `/help`，不做兼容别名或相似匹配；
+- 用户级或项目级 `review` Skill 可以按正常来源优先级完整覆盖内置样板，但不能覆盖其他固定命令。
 
 ## 3. 模块边界
 
@@ -530,7 +541,7 @@ Skill 参数（原文）：
 
 ### 14.3 命令冲突
 
-Skill 名称不得与任何固定内置命令 name 或 alias 冲突，也不得与 `?` 冲突。冲突属于最终 catalog fail-fast 错误，不能通过项目优先级覆盖内置命令。
+Skill 名称不得与任何仍然存在的固定内置命令 name 或 alias 冲突，也不得与 `?` 冲突。冲突属于最终 catalog fail-fast 错误，不能通过项目优先级覆盖内置命令。Chapter 08 的 `review` 与 `code-review` 已按本章兼容性规则从固定命令表移除，因此内置 `review` Skill 不构成冲突。
 
 `/skills rescan` 需要动态重建 registry；对正在 dispatch 的旧 registry 不做原地修改，当前命令完成后 UI adapter 原子替换 controller 和补全目录。
 

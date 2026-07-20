@@ -7,9 +7,6 @@ from pathlib import Path
 import pytest
 
 from mewcode_agent.commands import (
-    REVIEW_DEFAULT_PROMPT,
-    REVIEW_SCOPED_PREFIX,
-    REVIEW_SCOPED_SUFFIX,
     BuiltinCommandServices,
     CommandController,
     CommandMode,
@@ -216,7 +213,6 @@ def test_builtin_catalog_and_status_hints_are_exact(tmp_path: Path) -> None:
         "help",
         "status",
         "mode",
-        "review",
         "compact",
         "clear",
         "sessions",
@@ -231,7 +227,7 @@ def test_builtin_catalog_and_status_hints_are_exact(tmp_path: Path) -> None:
         "/compact",
     )
     assert fixture.registry.resolve("NOTES").name == "memory"  # type: ignore[union-attr]
-    assert fixture.registry.resolve("CODE-REVIEW").name == "review"  # type: ignore[union-attr]
+    assert fixture.registry.resolve("CODE-REVIEW") is None  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -315,38 +311,11 @@ async def test_status_reports_all_local_state_without_mutation(
         "generation=2",
         "未处理成功请求=2",
         "权限模式：strict",
-        "公开命令：11",
+        "公开命令：10",
     ):
         assert expected in text
     assert fixture.loop.status_calls == 1
     assert fixture.history.snapshot() == history_before
-
-
-@pytest.mark.asyncio
-async def test_review_uses_exact_execute_prompt_without_changing_default_mode(
-    tmp_path: Path,
-) -> None:
-    fixture = make_fixture(tmp_path)
-    fixture.ui.mode = "plan"
-
-    default_result = await fixture.controller.dispatch("/review")
-    scoped_result = await fixture.controller.dispatch(
-        "/CODE-REVIEW Src/ExactName.py"
-    )
-
-    assert default_result.success is True
-    assert scoped_result.success is True
-    assert fixture.ui.sent == [
-        (REVIEW_DEFAULT_PROMPT, "execute"),
-        (
-            REVIEW_SCOPED_PREFIX
-            + "Src/ExactName.py"
-            + REVIEW_SCOPED_SUFFIX,
-            "execute",
-        ),
-    ]
-    assert fixture.ui.mode == "plan"
-    assert fixture.history.snapshot() == []
 
 
 @pytest.mark.asyncio
