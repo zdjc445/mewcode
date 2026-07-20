@@ -36,6 +36,7 @@ class ToolRegistry:
     ) -> None:
         self._tools: dict[str, Tool] = {}
         self._mcp_tools_by_server: dict[str, tuple[Tool, ...]] = {}
+        self._skill_tools: tuple[Tool, ...] = ()
         self._security_boundary = security_boundary
 
     @property
@@ -70,15 +71,11 @@ class ToolRegistry:
                 raise ValueError(f"MCP 工具别名冲突: {tool.name}")
             replacement_names.add(tool.name)
 
-        old_mcp_names = {
-            tool.name
-            for group in self._mcp_tools_by_server.values()
-            for tool in group
-        }
+        old_dynamic_names = self._dynamic_tool_names()
         base_tools = [
             tool
             for name, tool in self._tools.items()
-            if name not in old_mcp_names
+            if name not in old_dynamic_names
         ]
         groups = dict(self._mcp_tools_by_server)
         if replacement:
@@ -91,6 +88,10 @@ class ToolRegistry:
             if tool.name in rebuilt:
                 raise ValueError(f"工具已注册: {tool.name}")
             rebuilt[tool.name] = tool
+        for tool in self._skill_tools:
+            if tool.name in rebuilt:
+                raise ValueError(f"Skill 工具名冲突: {tool.name}")
+            rebuilt[tool.name] = tool
         for grouped_server_id in sorted(groups):
             for tool in groups[grouped_server_id]:
                 if tool.name in rebuilt:
@@ -99,10 +100,69 @@ class ToolRegistry:
         self._tools = rebuilt
         self._mcp_tools_by_server = groups
 
+    def replace_skill_tools(self, tools: Iterable[Tool]) -> None:
+        """Atomically replace all directory-Skill tools."""
+
+        replacement = tuple(tools)
+        replacement_names: set[str] = set()
+        for tool in replacement:
+            if not isinstance(tool, Tool):
+                raise TypeError("Skill 工具必须实现 Tool")
+            if tool.name.startswith("mcp_") or tool.name == "load_skill":
+                raise ValueError(f"Skill 工具使用保留名称: {tool.name}")
+            if tool.name in replacement_names:
+                raise ValueError(f"Skill 工具名冲突: {tool.name}")
+            replacement_names.add(tool.name)
+
+        old_dynamic_names = self._dynamic_tool_names()
+        base_tools = [
+            tool
+            for name, tool in self._tools.items()
+            if name not in old_dynamic_names
+        ]
+        rebuilt: dict[str, Tool] = {}
+        for tool in base_tools:
+            if tool.name in rebuilt:
+                raise ValueError(f"工具已注册: {tool.name}")
+            rebuilt[tool.name] = tool
+        for tool in replacement:
+            if tool.name in rebuilt:
+                raise ValueError(f"Skill 工具名冲突: {tool.name}")
+            rebuilt[tool.name] = tool
+        for server_id in sorted(self._mcp_tools_by_server):
+            for tool in self._mcp_tools_by_server[server_id]:
+                if tool.name in rebuilt:
+                    raise ValueError(f"Skill 工具名冲突: {tool.name}")
+                rebuilt[tool.name] = tool
+        self._tools = rebuilt
+        self._skill_tools = replacement
+
+    def _dynamic_tool_names(self) -> set[str]:
+        return {
+            tool.name
+            for group in self._mcp_tools_by_server.values()
+            for tool in group
+        } | {tool.name for tool in self._skill_tools}
+
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def api_tools(self, protocol: ToolProtocol) -> list[dict[str, Any]]:
+    def tool_names(self) -> tuple[str, ...]:
+        return tuple(self._tools)
+
+    def api_tools(
+        self,
+        protocol: ToolProtocol,
+        *,
+        visible_names: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if visible_names is not None and not isinstance(visible_names, frozenset):
+            raise TypeError("visible_names 必须是 frozenset 或 None")
+        tools = tuple(
+            tool
+            for tool in self._tools.values()
+            if visible_names is None or tool.name in visible_names
+        )
         if protocol == "openai":
             return [
                 {
@@ -113,7 +173,7 @@ class ToolRegistry:
                         "parameters": tool.parameters,
                     },
                 }
-                for tool in self._tools.values()
+                for tool in tools
             ]
         if protocol == "anthropic":
             return [
@@ -122,7 +182,7 @@ class ToolRegistry:
                     "description": tool.description,
                     "input_schema": tool.parameters,
                 }
-                for tool in self._tools.values()
+                for tool in tools
             ]
         raise ValueError(f"不支持的工具协议: {protocol}")
 
