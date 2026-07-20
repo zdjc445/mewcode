@@ -8,7 +8,11 @@ import pytest
 
 from mewcode_agent.config import ProviderConfig
 from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
-from mewcode_agent.prompting.models import ControlMessage
+from mewcode_agent.prompting.models import (
+    ControlMessage,
+    ContextBoundaryMessage,
+    ContextSummaryMessage,
+)
 from mewcode_agent.providers.base import (
     ProviderError,
     ProviderRequest,
@@ -23,6 +27,28 @@ from mewcode_agent.providers.base import (
     ProviderUsageResult,
 )
 from mewcode_agent.providers.openai_provider import OpenAIProvider
+
+
+def test_openai_serializes_context_summary_and_boundary_as_system() -> None:
+    request = ProviderRequest(
+        "system",
+        (
+            ContextSummaryMessage(1, 2, '{"schema_version":1}'),
+            ContextBoundaryMessage(1, "重新读取精确内容"),
+        ),
+        None,
+    )
+
+    messages = OpenAIProvider._request_messages(request)
+
+    assert [message["role"] for message in messages] == [
+        "system",
+        "system",
+        "system",
+    ]
+    assert "<mewcode-summary" in messages[1]["content"]
+    assert "&quot;" not in messages[1]["content"]
+    assert "<mewcode-boundary" in messages[2]["content"]
 
 
 class FakeOpenAIStream:

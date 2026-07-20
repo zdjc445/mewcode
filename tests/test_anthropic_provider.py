@@ -8,7 +8,11 @@ import pytest
 
 from mewcode_agent.config import ProviderConfig
 from mewcode_agent.models import ChatMessage, ThinkingBlock, ToolCall
-from mewcode_agent.prompting.models import ControlMessage
+from mewcode_agent.prompting.models import (
+    ControlMessage,
+    ContextBoundaryMessage,
+    ContextSummaryMessage,
+)
 from mewcode_agent.providers.anthropic_provider import AnthropicProvider
 from mewcode_agent.providers.base import (
     ProviderError,
@@ -23,6 +27,25 @@ from mewcode_agent.providers.base import (
     ProviderUsageEvent,
     ProviderUsageResult,
 )
+
+
+def test_anthropic_serializes_context_summary_and_boundary_as_user_blocks() -> None:
+    request = ProviderRequest(
+        "system",
+        (
+            ContextSummaryMessage(1, 2, '{"schema_version":1}'),
+            ContextBoundaryMessage(1, "重新读取精确内容"),
+        ),
+        None,
+    )
+
+    messages = AnthropicProvider._request_messages(request)
+
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+    blocks = messages[0]["content"]
+    assert "<mewcode-summary" in blocks[0]["text"]
+    assert "<mewcode-boundary" in blocks[1]["text"]
 
 
 class FakeAnthropicEventStream:

@@ -5,6 +5,8 @@ from html import escape
 from mewcode_agent.models import ChatMessage
 from mewcode_agent.prompting.models import (
     ControlMessage,
+    ContextBoundaryMessage,
+    ContextSummaryMessage,
     PromptFrame,
     PromptModule,
 )
@@ -28,6 +30,24 @@ def render_control_message(message: ControlMessage) -> str:
         f"{opening}\n"
         f"{escape(message.content, quote=False)}\n"
         "</mewcode-control>"
+    )
+
+
+def render_context_summary(message: ContextSummaryMessage) -> str:
+    return (
+        "<mewcode-summary\n"
+        f'  generation="{message.generation}"\n'
+        f'  covered_history_end="{message.covered_history_end}">\n'
+        f"{escape(message.content_json, quote=False)}\n"
+        "</mewcode-summary>"
+    )
+
+
+def render_context_boundary(message: ContextBoundaryMessage) -> str:
+    return (
+        f'<mewcode-boundary generation="{message.generation}">\n'
+        f"{escape(message.content, quote=False)}\n"
+        "</mewcode-boundary>"
     )
 
 

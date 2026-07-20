@@ -10,8 +10,16 @@ from openai import AsyncOpenAI
 
 from mewcode_agent.config import ProviderConfig
 from mewcode_agent.models import ThinkingBlock, ToolCall
-from mewcode_agent.prompting.composer import render_control_message
-from mewcode_agent.prompting.models import ControlMessage
+from mewcode_agent.prompting.composer import (
+    render_context_boundary,
+    render_context_summary,
+    render_control_message,
+)
+from mewcode_agent.prompting.models import (
+    ControlMessage,
+    ContextBoundaryMessage,
+    ContextSummaryMessage,
+)
 from mewcode_agent.providers.base import (
     ProviderError,
     ProviderProtocol,
@@ -73,6 +81,22 @@ class OpenAIProvider:
                     }
                 )
                 continue
+            if isinstance(message, ContextSummaryMessage):
+                request_messages.append(
+                    {
+                        "role": "system",
+                        "content": render_context_summary(message),
+                    }
+                )
+                continue
+            if isinstance(message, ContextBoundaryMessage):
+                request_messages.append(
+                    {
+                        "role": "system",
+                        "content": render_context_boundary(message),
+                    }
+                )
+                continue
             if message.role == "assistant" and message.tool_calls:
                 payload: dict[str, Any] = {
                     "role": "assistant",
@@ -107,6 +131,16 @@ class OpenAIProvider:
                     {"role": message.role, "content": message.content}
                 )
         return request_messages
+
+    def prompt_payload(self, request: ProviderRequest) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self._config.model,
+            "messages": self._request_messages(request),
+            "max_tokens": self._config.max_tokens,
+        }
+        if request.tools:
+            payload["tools"] = list(request.tools)
+        return payload
 
     @staticmethod
     def _usage_result(raw_usage: Any | None) -> ProviderUsageResult:
@@ -157,15 +191,9 @@ class OpenAIProvider:
         raw_usage: Any | None = None
 
         try:
-            sdk_request: dict[str, Any] = dict(
-                model=self._config.model,
-                messages=self._request_messages(request),
-                max_tokens=self._config.max_tokens,
-                stream=True,
-                stream_options={"include_usage": True},
-            )
-            if request.tools:
-                sdk_request["tools"] = list(request.tools)
+            sdk_request = self.prompt_payload(request)
+            sdk_request["stream"] = True
+            sdk_request["stream_options"] = {"include_usage": True}
             stream = await self._client.chat.completions.create(**sdk_request)
             async for chunk in stream:
                 chunk_usage = getattr(chunk, "usage", None)

@@ -20,6 +20,8 @@ from mewcode_agent.prompting.loader import (
 )
 from mewcode_agent.prompting.models import (
     ControlMessage,
+    ContextBoundaryMessage,
+    ContextSummaryMessage,
     PromptFrame,
     PromptItem,
     PromptModule,
@@ -30,6 +32,8 @@ from mewcode_agent.prompting.runtime import PromptRuntime
 __all__ = [
     "BUILTIN_MODULES",
     "ControlMessage",
+    "ContextBoundaryMessage",
+    "ContextSummaryMessage",
     "GitEnvironment",
     "GitRequestEnvironmentCollector",
     "PromptComposer",

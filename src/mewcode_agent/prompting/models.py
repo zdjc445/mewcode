@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 from typing import Literal, TypeAlias
 
@@ -138,7 +139,51 @@ class ControlMessage:
             )
 
 
-PromptItem: TypeAlias = ChatMessage | ControlMessage
+@dataclass(frozen=True, slots=True)
+class ContextSummaryMessage:
+    generation: int
+    covered_history_end: int
+    content_json: str
+
+    def __post_init__(self) -> None:
+        if type(self.generation) is not int or self.generation <= 0:
+            raise ValueError("generation 必须为大于 0 的整数")
+        if (
+            type(self.covered_history_end) is not int
+            or self.covered_history_end <= 0
+        ):
+            raise ValueError("covered_history_end 必须为大于 0 的整数")
+        if not isinstance(self.content_json, str) or not self.content_json:
+            raise ValueError("content_json 必须为非空字符串")
+        try:
+            parsed = json.loads(self.content_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("content_json 必须是有效 JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("content_json 根节点必须是 object")
+
+
+@dataclass(frozen=True, slots=True)
+class ContextBoundaryMessage:
+    generation: int
+    content: str
+
+    def __post_init__(self) -> None:
+        if type(self.generation) is not int or self.generation <= 0:
+            raise ValueError("generation 必须为大于 0 的整数")
+        object.__setattr__(
+            self,
+            "content",
+            _normalized_content(self.content, "content"),
+        )
+
+
+PromptItem: TypeAlias = (
+    ChatMessage
+    | ControlMessage
+    | ContextSummaryMessage
+    | ContextBoundaryMessage
+)
 
 
 @dataclass(frozen=True, slots=True)

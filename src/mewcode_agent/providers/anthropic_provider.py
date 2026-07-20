@@ -11,8 +11,16 @@ from anthropic import AsyncAnthropic
 
 from mewcode_agent.config import ProviderConfig
 from mewcode_agent.models import ThinkingBlock, ToolCall
-from mewcode_agent.prompting.composer import render_control_message
-from mewcode_agent.prompting.models import ControlMessage
+from mewcode_agent.prompting.composer import (
+    render_context_boundary,
+    render_context_summary,
+    render_control_message,
+)
+from mewcode_agent.prompting.models import (
+    ControlMessage,
+    ContextBoundaryMessage,
+    ContextSummaryMessage,
+)
 from mewcode_agent.providers.base import (
     ProviderError,
     ProviderProtocol,
@@ -87,6 +95,28 @@ class AnthropicProvider:
                     ],
                 )
                 continue
+            if isinstance(item, ContextSummaryMessage):
+                AnthropicProvider._append_user_blocks(
+                    request_messages,
+                    [
+                        {
+                            "type": "text",
+                            "text": render_context_summary(item),
+                        }
+                    ],
+                )
+                continue
+            if isinstance(item, ContextBoundaryMessage):
+                AnthropicProvider._append_user_blocks(
+                    request_messages,
+                    [
+                        {
+                            "type": "text",
+                            "text": render_context_boundary(item),
+                        }
+                    ],
+                )
+                continue
             message = item
             if message.role == "user":
                 AnthropicProvider._append_user_blocks(
@@ -137,6 +167,18 @@ class AnthropicProvider:
                     {"role": "assistant", "content": message.content}
                 )
         return request_messages
+
+    def prompt_payload(self, request: ProviderRequest) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self._config.model,
+            "messages": self._request_messages(request),
+            "max_tokens": self._config.max_tokens,
+            "system": request.system_prompt,
+        }
+        if request.tools:
+            payload["tools"] = list(request.tools)
+            payload["tool_choice"] = {"type": "auto"}
+        return payload
 
     @staticmethod
     def _usage_result(raw: Any | None) -> ProviderUsageResult:
@@ -194,15 +236,7 @@ class AnthropicProvider:
         final_usage: Any | None = None
 
         try:
-            sdk_request: dict[str, Any] = dict(
-                model=self._config.model,
-                messages=self._request_messages(request),
-                max_tokens=self._config.max_tokens,
-                system=request.system_prompt,
-            )
-            if request.tools:
-                sdk_request["tools"] = list(request.tools)
-                sdk_request["tool_choice"] = {"type": "auto"}
+            sdk_request = self.prompt_payload(request)
             async with self._client.messages.stream(**sdk_request) as stream:
                 async for event in stream:
                     if event.type == "content_block_start":

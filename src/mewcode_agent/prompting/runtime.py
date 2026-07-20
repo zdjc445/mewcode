@@ -244,3 +244,11 @@ class PromptRuntime:
 
     def timeline(self) -> tuple[ControlMessage, ...]:
         return tuple(self._timeline)
+
+    @property
+    def active_request_sequence(self) -> int | None:
+        return self._active_request
+
+    @property
+    def active_round_number(self) -> int | None:
+        return self._active_round

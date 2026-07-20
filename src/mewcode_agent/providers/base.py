@@ -131,6 +131,8 @@ class LLMProvider(Protocol):
     @property
     def protocol(self) -> ProviderProtocol: ...
 
+    def prompt_payload(self, request: ProviderRequest) -> dict[str, Any]: ...
+
     def stream_chat(
         self,
         request: ProviderRequest,

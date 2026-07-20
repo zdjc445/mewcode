@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 
@@ -100,3 +101,135 @@ class ToolCompactionResult:
         )
         if any(type(value) is not int or value < 0 for value in values):
             raise ValueError("工具压缩统计必须是非负整数")
+
+
+def _validate_string_tuple(value: tuple[str, ...], field_name: str) -> None:
+    if not isinstance(value, tuple) or any(
+        not isinstance(item, str) for item in value
+    ):
+        raise ValueError(f"{field_name} 必须是字符串 tuple")
+
+
+@dataclass(frozen=True, slots=True)
+class SummarySections:
+    primary_requests: tuple[str, ...]
+    key_concepts: tuple[str, ...]
+    files_and_code: tuple[str, ...]
+    errors_and_fixes: tuple[str, ...]
+    solution_process: tuple[str, ...]
+    pending_tasks: tuple[str, ...]
+    current_work: tuple[str, ...]
+    next_step: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "primary_requests",
+            "key_concepts",
+            "files_and_code",
+            "errors_and_fixes",
+            "solution_process",
+            "pending_tasks",
+            "current_work",
+            "next_step",
+        ):
+            _validate_string_tuple(getattr(self, field_name), field_name)
+
+    def to_dict(self) -> dict[str, list[str]]:
+        return {
+            "primary_requests": list(self.primary_requests),
+            "key_concepts": list(self.key_concepts),
+            "files_and_code": list(self.files_and_code),
+            "errors_and_fixes": list(self.errors_and_fixes),
+            "solution_process": list(self.solution_process),
+            "pending_tasks": list(self.pending_tasks),
+            "current_work": list(self.current_work),
+            "next_step": list(self.next_step),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class VerbatimUserMessage:
+    history_index: int
+    content: str
+
+    def __post_init__(self) -> None:
+        if type(self.history_index) is not int or self.history_index < 0:
+            raise ValueError("history_index 必须是非负整数")
+        if not isinstance(self.content, str) or not self.content.strip():
+            raise ValueError("verbatim user content 必须是非空字符串")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "history_index": self.history_index,
+            "content": self.content,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryCheckpoint:
+    generation: int
+    covered_history_end: int
+    sections: SummarySections
+    user_messages_verbatim: tuple[VerbatimUserMessage, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.generation) is not int or self.generation <= 0:
+            raise ValueError("summary generation 必须大于 0")
+        if (
+            type(self.covered_history_end) is not int
+            or self.covered_history_end <= 0
+        ):
+            raise ValueError("covered_history_end 必须大于 0")
+        if not isinstance(self.sections, SummarySections):
+            raise ValueError("sections 类型无效")
+        if not isinstance(self.user_messages_verbatim, tuple):
+            raise ValueError("user_messages_verbatim 必须是 tuple")
+        indexes = tuple(
+            message.history_index for message in self.user_messages_verbatim
+        )
+        if indexes != tuple(sorted(indexes)) or len(indexes) != len(set(indexes)):
+            raise ValueError("用户原话 history_index 必须严格递增")
+        if indexes and indexes[-1] >= self.covered_history_end:
+            raise ValueError("用户原话索引必须位于 checkpoint 覆盖范围")
+
+    def to_dict(self) -> dict[str, object]:
+        sections = self.sections.to_dict()
+        return {
+            "schema_version": 1,
+            "generation": self.generation,
+            "covered_history_end": self.covered_history_end,
+            "primary_requests": sections["primary_requests"],
+            "key_concepts": sections["key_concepts"],
+            "files_and_code": sections["files_and_code"],
+            "errors_and_fixes": sections["errors_and_fixes"],
+            "solution_process": sections["solution_process"],
+            "user_messages_verbatim": [
+                message.to_dict()
+                for message in self.user_messages_verbatim
+            ],
+            "pending_tasks": sections["pending_tasks"],
+            "current_work": sections["current_work"],
+            "next_step": sections["next_step"],
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(
+            self.to_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ContextEstimate:
+    estimated_prompt_tokens: int
+    used_actual_baseline: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.estimated_prompt_tokens) is not int
+            or self.estimated_prompt_tokens < 0
+        ):
+            raise ValueError("estimated_prompt_tokens 必须是非负整数")
+        if type(self.used_actual_baseline) is not bool:
+            raise ValueError("used_actual_baseline 必须是布尔值")
