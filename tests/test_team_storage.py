@@ -119,11 +119,23 @@ def test_mailbox_rejects_corrupt_middle_line(tmp_path: Path) -> None:
     append_mailbox_message(path, _message())
     with path.open("ab") as handle:
         handle.write(b"not-json\n")
+    append_mailbox_message(path, _message("4" * 32))
 
     with pytest.raises(TeamError) as caught:
         load_mailbox(path)
 
     assert caught.value.code == "team_mailbox_invalid"
+
+
+def test_mailbox_ignores_parse_failure_in_final_complete_line(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "mailbox.jsonl"
+    append_mailbox_message(path, _message())
+    with path.open("ab") as handle:
+        handle.write(b"not-json\n")
+
+    assert load_mailbox(path) == (_message(),)
 
 
 def test_mailbox_rejects_duplicate_id_and_utf8_line_over_limit(

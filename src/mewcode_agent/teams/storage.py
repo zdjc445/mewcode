@@ -383,7 +383,8 @@ def _complete_lines(
 
 def load_mailbox(path: Path) -> tuple[TeamMailboxMessage, ...]:
     messages: list[TeamMailboxMessage] = []
-    for line in _complete_lines(path, "team_mailbox_invalid"):
+    lines = _complete_lines(path, "team_mailbox_invalid")
+    for index, line in enumerate(lines):
         try:
             item = _mapping(
                 _loads(line, "Mailbox line"),
@@ -396,8 +397,12 @@ def load_mailbox(path: Path) -> tuple[TeamMailboxMessage, ...]:
             values.pop("version")
             messages.append(TeamMailboxMessage(**values))
         except TeamError as exc:
+            if index == len(lines) - 1:
+                break
             raise TeamError("team_mailbox_invalid", "Mailbox line 无效") from exc
         except (TypeError, ValueError) as exc:
+            if index == len(lines) - 1:
+                break
             raise TeamError("team_mailbox_invalid", "Mailbox line 无效") from exc
     ids = tuple(item.message_id for item in messages)
     if len(ids) != len(set(ids)):

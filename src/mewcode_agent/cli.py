@@ -491,7 +491,7 @@ async def _run_application_once(
         )
         for tool in team_tools(team_manager):
             registry.register(tool)
-        if worktree_manager.available:
+        if worktree_manager.available and team_manager.available:
             worktree_manager.start_cleanup()
         hook_subagent_launcher = HookSubagentLauncher(
             catalog=worker_catalog,
