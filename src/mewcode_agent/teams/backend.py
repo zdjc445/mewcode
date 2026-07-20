@@ -159,6 +159,13 @@ class InProcessTeamBackend:
             )
             snapshot = await self._manager.wait_terminal(request.task.task_id)
             await self._manager.take_notifications(spec.session_id)
+        except asyncio.CancelledError:
+            try:
+                await self._manager.cancel(request.task.task_id)
+            except WorkerError:
+                pass
+            await self._manager.take_notifications(spec.session_id)
+            raise
         except WorkerError as exc:
             raise TeamError(exc.code, "Team member Worker 执行失败") from exc
         finally:

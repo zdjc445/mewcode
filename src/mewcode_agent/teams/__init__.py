@@ -2,6 +2,7 @@
 
 from mewcode_agent.teams.backend import InProcessTeamBackend, TeamBackend
 from mewcode_agent.teams.loader import load_team_config
+from mewcode_agent.teams.manager import TeamManager
 from mewcode_agent.teams.models import (
     TeamBackendRequest,
     TeamBackendResult,
@@ -41,6 +42,7 @@ __all__ = [
     "TeamDependencyResult",
     "TeamError",
     "TeamMailboxMessage",
+    "TeamManager",
     "TeamMemberRecord",
     "TeamPersistentState",
     "TeamRecord",

@@ -444,6 +444,16 @@ class TeamPersistentState:
             )
             if active is None or active.state not in ("active", "paused"):
                 raise ValueError("active_team_id 无效")
+        active_ids = tuple(
+            item.team_id
+            for item in self.teams
+            if item.state in ("active", "paused")
+        )
+        expected_active = (
+            () if self.active_team_id is None else (self.active_team_id,)
+        )
+        if active_ids != expected_active:
+            raise ValueError("active/paused Team 与 active_team_id 不一致")
 
 
 @dataclass(frozen=True, slots=True)

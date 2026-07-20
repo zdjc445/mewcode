@@ -310,6 +310,8 @@ def _append_json_lines(
     path: Path,
     items: tuple[Mapping[str, object], ...],
     code: str,
+    *,
+    line_limit: int | None = _LINE_LIMIT,
 ) -> None:
     encoded = tuple(
         json.dumps(
@@ -319,7 +321,9 @@ def _append_json_lines(
         ).encode("utf-8")
         for item in items
     )
-    if any(len(payload) > _LINE_LIMIT for payload in encoded):
+    if line_limit is not None and any(
+        len(payload) > line_limit for payload in encoded
+    ):
         raise TeamError(code, "Team JSONL 单行超过限制")
     payload = b"\n".join(encoded) + b"\n"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,7 +347,12 @@ def append_mailbox_message(path: Path, message: TeamMailboxMessage) -> None:
     _append_json_line(path, _message_data(message), "team_mailbox_invalid")
 
 
-def _complete_lines(path: Path, code: str) -> tuple[str, ...]:
+def _complete_lines(
+    path: Path,
+    code: str,
+    *,
+    line_limit: int | None = _LINE_LIMIT,
+) -> tuple[str, ...]:
     if not path.exists():
         return ()
     if not path.is_file():
@@ -359,7 +368,11 @@ def _complete_lines(path: Path, code: str) -> tuple[str, ...]:
         raw_lines.pop()
     lines: list[str] = []
     for raw in raw_lines:
-        if not raw or raw.endswith(b"\r") or len(raw) > _LINE_LIMIT:
+        if (
+            not raw
+            or raw.endswith(b"\r")
+            or (line_limit is not None and len(raw) > line_limit)
+        ):
             raise TeamError(code, "Team JSONL 包含无效行")
         try:
             lines.append(raw.decode("utf-8", errors="strict"))
@@ -408,6 +421,7 @@ def append_member_history(
             for message in messages
         ),
         "team_state_invalid",
+        line_limit=None,
     )
 
 
@@ -415,7 +429,9 @@ def load_member_history(path: Path, *, limit: int) -> tuple[ChatMessage, ...]:
     if type(limit) is not int or limit < 2 or limit % 2 != 0:
         raise ValueError("history limit 必须是大于等于 2 的偶数")
     result: list[ChatMessage] = []
-    for index, line in enumerate(_complete_lines(path, "team_state_invalid")):
+    for index, line in enumerate(
+        _complete_lines(path, "team_state_invalid", line_limit=None)
+    ):
         try:
             item = _mapping(
                 _loads(line, "Member history line"),
