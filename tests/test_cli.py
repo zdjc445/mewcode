@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from mewcode_agent import cli
 from mewcode_agent.mcp import McpConnectFailed, McpConfiguration
+from mewcode_agent.models import ChatMessage
 from mewcode_agent.notes import NotesSnapshot, note_paths, write_note_scope
 from mewcode_agent.prompting.environment import PromptEnvironmentError
+from mewcode_agent.sessions import SessionJournal
 from mewcode_agent.tools.registry import ToolRegistry
 
 
@@ -141,6 +144,53 @@ def test_cli_persists_messages_through_active_session_manager(
     assert len(lines) == 2
     assert '"content":"persisted user"' in lines[0]
     assert '"content":"persisted assistant"' in lines[1]
+
+
+def test_cli_startup_and_shutdown_never_clean_existing_sessions(
+    tmp_path: Path,
+    valid_config_text: str,
+    monkeypatch,
+) -> None:
+    (tmp_path / "llm_providers.yaml").write_text(
+        valid_config_text,
+        encoding="utf-8",
+    )
+    home_path = tmp_path / "home"
+    sessions_root = home_path / ".mewcode-agent" / "sessions"
+    existing_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    existing = SessionJournal(
+        sessions_root=sessions_root,
+        session_id=existing_id,
+        project_root=tmp_path,
+        provider_id="preserved-provider",
+        model="preserved-model",
+        now_factory=lambda: datetime(2000, 1, 1, tzinfo=timezone.utc),
+    )
+    existing.append(ChatMessage(role="user", content="preserve me"))
+    existing.close()
+    directory = sessions_root / existing_id
+    messages_before = (directory / "messages.jsonl").read_bytes()
+    meta_before = (directory / "meta.json").read_bytes()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-secret")
+
+    class FakeAgentLoop:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    async def run_app(_self: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "AgentLoop", FakeAgentLoop)
+    monkeypatch.setattr(cli.ChatApp, "run_async", run_app)
+
+    assert cli.main() == 0
+    assert directory.is_dir()
+    assert (directory / "messages.jsonl").read_bytes() == messages_before
+    assert (directory / "meta.json").read_bytes() == meta_before
+    assert [item.name for item in sessions_root.iterdir()] == [existing_id]
 
 
 def test_cli_reports_invalid_security_config(
